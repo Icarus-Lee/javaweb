@@ -56,12 +56,17 @@ export default defineConfig({
   plugins: [vue()],                  // ← @vitejs/plugin-vue：教 Vite 认得 .vue 文件
   server: {
     port: 5180,                      // dev server 常驻端口
-    proxy: { '/api': 'http://127.0.0.1:8084' }   // ① 开发代理：把 /api 转给后端
+    proxy: {
+      '/apitrain': {
+        target: 'http://127.0.0.1:8084',
+        rewrite: p => p.replace(/^\/apitrain/, '/api'),
+      }
+    }   // ① 开发代理：把 /apitrain 还原成后端的 /api 转给后端
   },
 })
 ```
 
-**proxy 一行是"前后端分离开发的桥梁"**：页面里 axios baseURL `/api`（api.js:3），
+**proxy 一段是"前后端分离开发的桥梁"**：页面里 axios baseURL `/apitrain`（api.js:3，与 Nginx 反代别名同源，dev/prod 自己也能零改代），
 dev server 听到 `/api/...` 就**转手转发给 8084 的 train 后端**——你的浏览器只觉得"同源"。
 而生成的 nginx.conf 用 `/apitrain/` 前缀做同一件事（下文）——**一侧换风景，页面代码一个字不改**。
 
@@ -205,9 +210,9 @@ python3 -m http.server 8899 --directory dist &   # 任何静态服务器，包�
 
 ### 实验 3：dev 与 build 双端接口对拿了同一套代码
 
-- dev：`vite.config.js` 里 `proxy /api → 8084`，页面里 axios `baseURL: '/api'` —— **零改代**运行。
+- dev：`vite.config.js` 里 `proxy /apitrain → 8084（重写为 /api）`，页面里 axios `baseURL: '/apitrain'` —— **零改代**运行。
 - 生产：**没有 Vite 了**！由 nginx `location /apitrain/` 反代（注意前缀变了 `/apitrain` → `/api/`）。
-  但本站 dist 里的 axios baseURL 仍是 `/api`？——**对**，因为 nginx-reload.sh 的反代把
+  但前端 axios baseURL 用的是 `/apitrain`？——**对**（dev 代理/prod 反代都认这个别名，`rewrite` 把它还原成后端的 `/api`），所以 nginx-reload.sh 的反代把
   `/apitrain/` 前缀剥掉再转给 8084 的 `/api/`，"两边桥接"由 nginx 负责（nginx.conf:~50-54）。
 - 验证：`curl http://127.0.0.1:9090/apitrain/trips`（200 JSON）；
   `curl http://127.0.0.1:5180/api/trips`（dev 模式同样 200）——**接口地址对页面**完全无感。
@@ -240,7 +245,7 @@ python3 -m http.server 8899 --directory dist &   # 任何静态服务器，包�
 ```js
 server: {
   port: 5200,                                   // 端口可换
-  proxy: { '/api': 'http://127.0.0.1:8084' }    // 指向不变也一样能跑
+  proxy: { '/apitrain': { target: 'http://127.0.0.1:8084', rewrite: p => p.replace(/^\/apitrain/, '/api') } }  // 指向不变也一样能跑
 }
 ```
 
