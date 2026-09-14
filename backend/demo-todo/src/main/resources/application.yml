@@ -1,0 +1,14 @@
+spring:
+  application:
+    name: demo-todo
+  datasource:
+    url: jdbc:h2:file:./data/demo-todo;AUTO_SERVER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update      # 每次启动按实体生成/更新表（教学用，生产需迁移工具）
+    open-in-view: false
+server:
+  port: 8081

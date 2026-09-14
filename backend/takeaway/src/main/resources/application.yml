@@ -1,0 +1,34 @@
+spring:
+  application:
+    name: takeaway
+  datasource:
+    url: jdbc:h2:file:./data/takeaway;AUTO_SERVER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+  kafka:
+    bootstrap-servers: 127.0.0.1:9092
+    consumer:
+      group-id: dispatch
+      auto-offset-reset: latest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      key-deserializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+app:
+  jwt:
+    secret: takeaway-demo-secret-key-please-change-in-prod-3a
+    ttl-minutes: 120
+
+server:
+  port: 8085

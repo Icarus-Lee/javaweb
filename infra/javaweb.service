@@ -1,0 +1,26 @@
+# javaweb systemd 单元模板（X01 部署手册配套）
+# 用法：把本文件拷到 /etc/systemd/system/javaweb-takeaway.service 后
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now javaweb-takeaway
+# 注意：本项目默认用 infra/start-all.sh（nohup 方式）跑全栈；
+# systemd 适合"只盯一个服务"的生产式部署（以 takeaway 为例，其余服务同理换名字/端口）。
+
+[Unit]
+Description=javaweb takeaway (Spring Boot 8085)
+After=network.target redis.service kafka.service
+
+[Service]
+Type=simple
+User=icaruslee
+WorkingDirectory=/home/icaruslee/Projects/javaweb
+Environment=JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+Environment=PATH=/usr/lib/jvm/java-21-openjdk/bin:/usr/bin:/bin
+ExecStart=/usr/lib/jvm/java-21-openjdk/bin/java -jar backend/takeaway/target/takeaway-1.0.0.jar
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/icaruslee/Projects/javaweb/logs/takeaway-systemd.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

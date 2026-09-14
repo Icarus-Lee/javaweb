@@ -1,0 +1,8 @@
+build/
+backend/*/target/
+frontend/*/node_modules/
+tools/kafka/
+data/
+logs/
+*.log
+/target/
