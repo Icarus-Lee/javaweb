@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-export const api = axios.create({ baseURL: '/api' })
+export const api = axios.create({ baseURL: '/apitrain' })
 
 api.interceptors.request.use((c) => {
   const token = localStorage.getItem('train_token')

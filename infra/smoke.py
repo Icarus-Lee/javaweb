@@ -62,6 +62,14 @@ for i in (1, 2, 3, 4, 5):
     subprocess.run(["redis-cli", "set", f"takeaway:dish:{i}:stock", "5"],
                    capture_output=True)
 ok("货架补满（1-5 号菜 stock=5）")
+# 火车余票复位（教程 T 实验会卖出真票）
+SEATS = {1: 3, 2: 2, 3: 1, 4: 5, 5: 4}
+for tid, total in SEATS.items():
+    subprocess.run(["redis-cli", "set", f"train:trip:{tid}:stock", str(total)],
+                   capture_output=True)
+    subprocess.run(["redis-cli", "set", f"train:trip:{tid}:seq", "0"],
+                   capture_output=True)
+ok("火车余票复位（车次 1-5）")
 try:
     import socket
     s = socket.create_connection(("127.0.0.1", 9092), 2); s.close()

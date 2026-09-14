@@ -5,7 +5,12 @@ export default defineConfig({
   base: '/takeout-ui/',
   plugins: [vue()],
   server: {
-    port: 5180,
-    proxy: { '/api': 'http://127.0.0.1:8085' }
+    port: 5181,
+    proxy: {
+      '/apitakeout': {
+        target: 'http://127.0.0.1:8085',
+        rewrite: p => p.replace(/^\/apitakeout/, '/api'),
+      }
+    }
   }
 })

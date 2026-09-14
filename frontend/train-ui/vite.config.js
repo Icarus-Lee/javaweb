@@ -6,6 +6,11 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     port: 5180,
-    proxy: { '/api': 'http://127.0.0.1:8084' }
+    proxy: {
+      '/apitrain': {
+        target: 'http://127.0.0.1:8084',
+        rewrite: p => p.replace(/^\/apitrain/, '/api'),
+      }
+    }
   }
 })
