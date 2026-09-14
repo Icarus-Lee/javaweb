@@ -226,7 +226,7 @@ curl -s -X POST http://127.0.0.1:8081/api/tasks \
 
 （id 随数据库累积滚动，不同数字正常。）
 
-### 3）官方冒烟：22 条断言全绿
+### 3）官方冒烟：23 条断言全绿
 
 ```bash
 python3 infra/smoke.py
@@ -241,7 +241,7 @@ python3 infra/smoke.py
   ✓ 反代 /apitrain → 8084
   ✓ 控制台首页 200
 
-smoke: 22 通过 / 0 失败
+smoke: 23 通过 / 0 失败
 ```
 
 这 22 条覆盖 5 个服务、Kafka 在线、两条 API 主链与 nginx 反代。**本系列后续每课的动手验证，环境有怀疑时都可重跑它。**

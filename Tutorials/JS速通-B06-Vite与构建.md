@@ -72,8 +72,8 @@ dev server 听到 `/api/...` 就**转手转发给 8084 的 train 后端**——�
 ```
 frontend/train-ui/dist/
 ├── assets/
-│   └── index-De0t7uFW.js          ← 全部 JS（Vue + 你的 App.vue + api）合成的一坨
-└── index.html                      ← 瘦身后的入口（<script src="...assets/index-De0t7uFW.js">）
+│   └── train-ui/assets/index-De0t7uFW.js ← 全部 JS（Vue + App.vue + api）（Vue + 你的 App.vue + api）合成的一坨
+└── index.html                      ← 瘦身后的入口（<script src="/train-ui/assets/index-De0t7uFW.js">（base 前缀已打进引用））
 ```
 
 对比源码目录（src/ 一共 3 个文件：App.vue/main.js/api.js；node_modules 里几百的依赖）：
@@ -103,7 +103,7 @@ grep "script" dist/index.html        # 产物引用带 hash；dev 版引用 /src
 **预期形态**：
 
 ```
--rw-r--r-- 1 user user 62K dist/assets/index-De0t7uFW.js   ← minified 主包
+-rw-r--r-- 1 user user 62K dist/assets/index-*.js ← minified 主包（文件名 hash，每次内容变化即新名）
 ```
 
 （`hash` 指纹功能和"改动换名"是长缓存策略的基础——**产物一改、名全换、缓存必失效**。）

@@ -5,6 +5,7 @@ import urllib.request
 import urllib.error
 import sys
 import time
+import subprocess
 
 BASE = {
     "todo":    "http://127.0.0.1:8081/api",
@@ -56,6 +57,11 @@ def expect(desc, name, method, path, want_code, body=None, token=None, want_body
     return None
 
 print("== 基础设施 ==")
+# 对账前把外卖货架补满（教程实验可能已把库存卖光；重置只影响演示数据）
+for i in (1, 2, 3, 4, 5):
+    subprocess.run(["redis-cli", "set", f"takeaway:dish:{i}:stock", "5"],
+                   capture_output=True)
+ok("货架补满（1-5 号菜 stock=5）")
 try:
     import socket
     s = socket.create_connection(("127.0.0.1", 9092), 2); s.close()

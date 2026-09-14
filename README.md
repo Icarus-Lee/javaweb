@@ -9,7 +9,7 @@
 cd ~/Projects/javaweb
 bash infra/build.sh       # 编译 5 个后端 jar + 2 个前端 dist
 bash infra/start-all.sh   # 一键起 Redis/Kafka/5 个后端/Nginx 反代
-bash infra/smoke.sh       # 22 项断言全绿（API+页面）
+bash infra/smoke.sh       # 23 项断言全绿（API+页面）
 bash infra/stop-all.sh    # 全停
 ```
 
@@ -51,7 +51,7 @@ Kafka topics：`train-order-events`、`takeout-order-events`（单一 Broker KRa
 
 ## 测试与对账
 
-- `infra/smoke.py`：22 条断言（Java 服务健康、JWT 下发、下单、Kafka 消费端异步生效确认、反代页面）
+- `infra/smoke.py`：23 条断言（Java 服务健康、JWT 下发、下单、Kafka 消费端异步生效确认、反代页面）
 - 教程 T06/W05 里有防超卖与缓存穿透的**对账实验**（并发抢票 vs 库存余量的真实数字）
 
 ## 教程（Tutorials/ 65 篇）

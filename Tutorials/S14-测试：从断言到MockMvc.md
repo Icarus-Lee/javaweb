@@ -1,6 +1,6 @@
-# S14 · 测试：从断言到 MockMvc（单测 vs 集成 vs smoke：22 断言实录）
+# S14 · 测试：从断言到 MockMvc（单测 vs 集成 vs smoke：23 断言实录）
 
-> **本节要点**：代码写完只是"编译过"，**"真的能跑"要亲手按下按钮**。本章给三条测试阶梯：单元测试（类内真相）、集成测试（Spring 起个小环境、MockMvc 打 HTTP）、冒烟测试（全栈 22 断言打真环境）。三者各管一层，谁也不替代谁；全部有今天的机器实录：`smoke: 22 通过 / 0 失败`、`mvn test → Tests run: 3, Failures: 0`。
+> **本节要点**：代码写完只是"编译过"，**"真的能跑"要亲手按下按钮**。本章给三条测试阶梯：单元测试（类内真相）、集成测试（Spring 起个小环境、MockMvc 打 HTTP）、冒烟测试（全栈 23 断言打真环境）。三者各管一层，谁也不替代谁；全部有今天的机器实录：`smoke: 23 通过 / 0 失败`、`mvn test → Tests run: 3, Failures: 0`。
 > **前置知识**：S04（Controller）、S06（校验）、S13（拦截器/401——测试也要验门卫）。
 > **产出**：会区分三阶测试各自的适用问题；能自信用 `MockMvc` 写一条"POST+GET"双步集成断言；会跑项目级冒烟并读懂 22 行的 ✓/✗ 汇报。
 
@@ -9,7 +9,7 @@
 > 📀 **本站你会得到**：
 > - 一张三阶测试对照表（谁慢、谁真、谁贵）
 > - `TestTaskController` 全文 + **真实的 `mvn test` 输出**（3/3 绿实录）
-> - smoke.py 的 22 断言逐段导览（含"防超卖、审计、派单"的干货位）
+> - smoke.py 的 23 断言逐段导览（含"防超卖、审计、派单"的干货位）
 
 ---
 
@@ -162,7 +162,7 @@ on field 'title': rejected value []; ... default message [标题不能为空]] ]
 
 ---
 
-## 4. 冒烟测试：全栈 22 断言（infra/smoke.py 走查 + 今天的实录）
+## 4. 冒烟测试：全栈 23 断言（infra/smoke.py 走查 + 今天的实录）
 
 ### 4.1 断言清单路线图
 
@@ -214,7 +214,7 @@ on field 'title': rejected value []; ... default message [标题不能为空]] ]
   ✓ 反代 /apitrain → 8084
   ✓ 控制台首页 200
 
-smoke: 22 通过 / 0 失败
+smoke: 23 通过 / 0 失败
 ```
 
 **这一大同一 grid 是你未来上线**每天要打印的"全栈心电图"——**先 22 绿，再 debug**。**16/6、20/2 的半绿是**最快定位出哪一层的体检仪：如今天实锤"基础设施坏 → 拓扑勉强通"的分别。
@@ -238,7 +238,7 @@ cd backend && mvn -pl demo-todo test
 
 # 2) 跑冒烟
 bash infra/start-all.sh        # 若全套未在线
-python3 infra/smoke.py         # 期望: smoke: 22 通过 / 0 失败
+python3 infra/smoke.py         # 期望: smoke: 23 通过 / 0 失败
 
 # 3) 折一个断言看它怎么报（教学性破坏）
 # 临时改 smoke.py 里 "todo 删除" 断言语句的 expect 204→200，再跑一次

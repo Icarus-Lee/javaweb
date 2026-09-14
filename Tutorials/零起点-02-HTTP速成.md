@@ -21,7 +21,7 @@
 
 ### 3️⃣ 开工前自查
 
-- [ ] 全栈已起（`bash infra/start-all.sh`，22 断言绿）
+- [ ] 全栈已起（`bash infra/start-all.sh`，23 断言绿）
 - [ ] 终端有 `curl`（`curl --version` 能出版本号）
 - [ ] 读过 Z01 的接线表
 

@@ -295,4 +295,4 @@ PID `81746`、线程 `io-8084-exec-10`（Tomcat request performer）——**下�
 
 ## 10. 下一站
 
-生意搭好了，怎么知道它**真的能跑**？S14：测试——单元测试 vs 集成测试 vs smoke（infra/smoke.py 22 断言实录），并亲手用 MockMvc 写一个最小测试 → 跑 `mvn test`，**用真实输出对照**（今天的 3/3 绿实录等着你）。
+生意搭好了，怎么知道它**真的能跑**？S14：测试——单元测试 vs 集成测试 vs smoke（infra/smoke.py 23 断言实录），并亲手用 MockMvc 写一个最小测试 → 跑 `mvn test`，**用真实输出对照**（今天的 3/3 绿实录等着你）。
