@@ -149,7 +149,59 @@ train-order-events
 
 ---
 
+## 4.5 工程实录：踩坑与修复——数据目录"整族重生"的三手证据
+
+这一段不是设计好的剧本：教学写作当日，本机中间件发生了一次真实的环境重置——**Kafka 数据目录被一键重置（`rm -rf data/kafka/kraft` + format + 重启发生于 09:56）**。事故现场正好把本章三个论点从"纸面"变成"真账"，一层层读：
+
+### 证据一：LOG-END 失忆（业务清零的直接表象）
+
+```
+$ tools/kafka/bin/kafka-consumer-groups.sh --bootstrap-server 127.0.0.1:9092 \
+      --describe --group dispatch 2>/dev/null
+GROUP    TOPIC                  PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+dispatch takeout-order-events   0          2               2               0
+```
+
+重置前 dispatch 组早已追平 10 条（LAG 0）；重置后 LOG-END 只剩 **2**——**不是"少了 8 条消息"，而是 topic 整个新生成、从零起步**。`--from-beginning` 只能读到"新世代"的 2 条。
+
+### 证据二：出生证实拍——新 cluster-id 的诞生
+
+重置后再跑撞卡（假 UUID 11111111-…），读出的本地真号已经换人：
+
+```
+Exception in thread "main" java.lang.RuntimeException: Invalid cluster.id in:
+/home/icaruslee/Projects/javaweb/data/kafka/kraft/meta.properties.
+Expected 11111111-2222-3333-4444-555555555555,
+but read 9b087bc8-5f23-47c9-8bf9-a0d579a05894
+```
+
+上一轮本章实测的旧号是 `575f7511-…`，现在是 `9b087bc8-…`——**"出生证"换了人就换本系列所有号**。定位手段同：给 format 一张假身份证，让它把地里埋的证件号交出来（比 `cat meta.properties` 更具"事故现场感"，脚本化探测也这么写）。
+
+### 证据三：消费组集体"无状态重生"
+
+`--list` 里真实的组只剩 `dispatch` 与 `audit`（业务在跑自动注册），旧的临时组（console-consumer-XXXX、k04-tempdemo）随风而散——**组的账挂在 broker 的 `__consumer_offsets` 主题上，主题本身也在被删的目录里**。这不是"组丢了消息"，是"整个世界换了一卷帐纸"。
+
+### 定位思路与修复
+
+1. **第一步对号入座**：`--describe` 六列、`--list` 三条不变——若它们同时缩小/改名，先怀疑"数据目录级事件"，而不是消费者代码。
+2. **第二步验证出生证**：撞卡读号 → 与团队记录比对 → 判断"换了生命"。
+3. **修复（其实是重建）**：按 start-all 惯例重灌——业务 topic 自动再生（auto-create 或生产者首发），消费组按业务重开账。**教学环境的重置成本被 start-all 压到一分钟，这不是巧合，是"db 可整体删除即重置"设计的红利**（start-all.sh 注释原话）。
+4. **教训转化**：训练一个习惯——**排障先分清"进程级故障"（可以重启救）与"数据级故障"（目录都没了，别谈重启）**。`grep "Kafka Server started" logs/kafka.log` 与 `--describe` 是否掉线，是两者的分水岭。
+
+### 一手 diff：事故前后的对照台词
+
+| 维度 | 事故前（18:26 一轮实录） | 事故后（09:56 重置） |
+|---|---|---|
+| cluster-id | `575f7511-…` | `9b087bc8-5f23-47c9-8bf9-a0d579a05894` |
+| takeout LOG-END | 10 | 2（又是新生成后的新账） |
+| 组列表 | 6 个（含临时组） | 2 个业务组自愈注册 |
+
+**一句话**：KRaft 起停本身无害（数据守恒，第 4 节验证），**删数据目录才是"一族一生"的界碑**——本章所有"守恒"结论，都要加上这个前提才完整。
+
+---
+
 ## 5. 生产对照表（教学选择 vs 真实部署）
+
 
 | 撞点 | 本项目 | 生产的常态 |
 |---|---|---|

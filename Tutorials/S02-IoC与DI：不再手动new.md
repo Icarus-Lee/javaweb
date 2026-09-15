@@ -4,6 +4,14 @@
 >
 > 学完本课你将能：说出手动 new 的四个具体毛病；看懂本项目所有真实代码里的"构造器注入"样式；回答"三个注解该在什么层用什么"。
 
+## 问题出发
+
+一次真机实录（我写本课时真踩的）：为了教学在 demo-counter 里新写了"推送器"类 `PushNotifier`，
+`HelloGate` 想要它——但**忘了贴 @Component**。启动 3 秒内 Spring 直接拒答：
+`required a bean of type '...Notifier' that could not be found`。
+这不是运行时才炸的坑（那时业务已上线），而是**启动期 fail-fast**——IoC 容器最值钱的一次自我帮助。
+本篇讲"对象谁来造"的权力转移，同时把这些"容器拒绝发货"的真实案例当反面教材。
+
 ## 本站名词卡
 
 | 名词 | 一句话人话 |
@@ -224,6 +232,66 @@ curl -s http://127.0.0.1:8083/api/counter
 ```
 
 这次背后是 `StringRedisTemplate` Bean 以**一个**连接（连接池之一）承载所有请求——若是每次 `new`，每个请求都要新建连接再舍弃，Redis 会毫无意义地多端服务。**"Bean 的单例 + 注入的复用"就是这行数字能一直增长的成本解释。**
+
+## 五、工程实录：踩坑与修复（真机实测）
+
+### 实录：忘了 @Component——启动期 fail-fast 与一行修复
+
+**问题**：`@Component PushNotifier` 的目标类**漏贴托管标记**，`HelloGate` 在构造器参数里要 `Notifier`：
+
+```java
+// 修复前（教学复现的临时类，已还原）：PushNotifier 上没有 @Component
+@Component
+public class HelloGate {
+    public HelloGate(Notifier n) { log.info("注入到的 Notifier = {}", n.getClass().getSimpleName()); }
+}
+```
+
+**现场复现**（demo-counter 真机 2026-09-15 12:49）：
+
+```bash
+cd ~/Projects/javaweb && source infra/env.sh
+timeout 25 java -jar backend/demo-counter/target/demo-counter-1.0.0.jar 2>&1 | tail -12
+```
+
+真实输出（Spring Boot 3.5 原样话术）：
+
+```text
+***************************
+APPLICATION FAILED TO START
+***************************
+
+Description:
+
+Parameter 0 of constructor in com.javaweb.counter.temp.HelloGate required a bean of type 'com.javaweb.counter.temp.Notifier' that could not be found.
+
+
+Action:
+
+Consider defining a bean of type 'com.javaweb.counter.temp.Notifier' in your configuration.
+```
+
+**逐行解读（一行一个知识）**：
+1. **"Parameter 0 of constructor"**——容器精确指到构造器的第 0 个参数：它算到了"你在**构造器注入**"这一步；
+2. **"required a bean ... that could not be found"**：所有被扫描进来的 Bean 都试了，没有类型吻合者；
+3. **Action 给了两个修法的提示**——"贴 `@Component`"或"在配置类里写 `@Bean` 生产者"（本项目的 KafkaTemplate / StringRedisTemplate 就是自动装配走 @Bean 路线受害者，S02 第二节依赖树看一眼便知）。
+
+**diff 修复**（一字）：
+
+```diff
+ public class PushNotifier implements Notifier {
+-    public String send(String msg) { return "push:" + msg; }
++    public String send(String msg) { return "push:" + msg; }
+ }
++@Component         ← 补上：让容器"看见"这个类
+```
+
+实际是把 `@Component` 写在类上（import org.springframework.stereotype.Component），重编重起——
+真机实测：`Started CounterApp in 1.382 seconds`，`curl /api/counter` → `{"n":6}`（启动绿 纯直通）。
+
+**教学点**：这个失败发生在 **refresh 阶段**——所有 Bean 装配完才起来 Web 服务；没有"起了一半"的半死不活进程。
+跟"构造器注入对字段注入的优势"呼应：**启动即全面装配，没有"忘注入"的运行时 null**——
+像上节说的那样 `private final` 使 null 不可能诞生。
 
 ## 思考题
 1. 构造器注入 vs 字段上贴 `@Autowired` 注入各有什么优缺点？至少答出：`final`、脱离 Spring 的可测性、循环依赖暴露时机三点。

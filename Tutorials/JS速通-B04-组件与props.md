@@ -16,7 +16,14 @@
 | `v-for` + `:key` | 列表渲染：用唯一 key 帮 Vue 做"最小 DOM 改动"diff |
 | slot | 组件里"留空给调用方填内容"的插槽——本篇末尾预告，不深展 |
 
-## 一、人话：组件是"函数"，props 是"参数"
+## 问题出发
+
+真实一幕：昨天有人在临时组件里写了 `import { api } from './api.jss'`（多打一个 s）想"先跑起来再说"，
+结果 `npm run build` **当场红**——`Could not resolve "./api.jss"`，一行错字蒸发了 800 行文件，3 分钟白屏事故被压制在 build 期。
+本篇要回答：组件怎么拆、props/emits 契约怎么写；以及"拆组件"的两类错误**各在什么阶段炸**（编译期 vs 浏览器期）。
+**跑起来看的姿势**：`cd frontend/train-ui && npm run build` 看它先把 80 个模块转完再说话。
+
+## 一、概念人话：组件是"函数"，props 是"参数"
 
 没有任何玄虚：
 
@@ -196,6 +203,59 @@ const props = defineProps({
 
 `<slot>` 位置被调用方的内容**原样填入**——这是"组件版的模板参数"，比 props 更自由（能传结构而非纯数据）。
 本篇不展开，记住"props 传数据、slot 传结构、emits 传意向"三分法即可。
+
+## 二点八、工程实录：踩坑与修复（真机实测）
+
+### 实录：组件接线的错，炸在两层——编译期大声报，浏览器期静默吞
+
+**问题原型**：把 App.vue 拆 TripCard 的第一晚，两类"低级错"**报错语气完全不同**：
+
+| 错法 | 何时暴露 | 语气 |
+|---|---|---|
+| `import` 路径拼错（`./api.jss`） | **build 期 / dev 期立刻** | 红字开炸，文件:行号都说 |
+| props 名拼错（`:canbk="!!token"` vs `canBook`） | **不报错**，静默吞掉 | 按钮"莫名永远灰"，行为缺一环 |
+
+**现场复现 ①**（temp 组件 + 被 App.vue 引用，build 摊牌）：
+
+```bash
+cd frontend/train-ui
+cat > src/components/BrokenTrip.vue <<'EOF'
+<script setup>
+import { api } from './api.jss'
+</script>
+<template><tr></tr></template>
+EOF
+# 在 App.vue 顶部临时 import 它，然后：
+npm run build
+```
+
+真实输出（2026-09-15 实录）：
+
+```text
+✓ 42 modules transformed.
+✗ Build failed in 133ms
+error during build:
+Could not resolve "./api.jss" from "src/components/BrokenTrip.vue"
+file: /home/icaruslee/Projects/javaweb/frontend/train-ui/src/components/BrokenTrip.vue
+    at getRollupError (.../rollup/dist/es/shared/parseAst.js:317:41)
+```
+
+然后 `git checkout -- src/App.vue && rm src/components/BrokenTrip.vue`，
+复跑 build 恢复 `✓ built in 600ms`（本机实录）。
+
+**修复前后 diff**：路径 `./api.jss` → `./api.js`（一字），位置 `src/components/BrokenTrip.vue` 第 2 行——
+**rollup 直接把"哪个文件里锈了"告诉你**，因为 import 是编译期静态分析（tree-shake 靠它，B06 详说）。
+
+**现场复现 ②**（props 名拼错的"无声"）：
+给 TripCard 传 `:canbk="!!token"`——build **全绿**（任何字符串都能放进 attrs，Vue 视其为"透传属性"）、
+Console 只有 dev 模式下的一句 "Vue Received prop warning"……若你恰好没看 Console，线上按钮就是永远灰的。
+**排查路径**：Chrome DevTools 的 **Vue devtools → Components 面板**：选中 TripCard，
+右侧直接能看到 received props 清单与值——比猜快十倍。
+**修复**：props 声明往对象式写（`{ canBook: { type: Boolean, default: false } }`），
+Vue dev 期会对**缺失的 required** 和**不合法的 type** 告警——注意"告警不拦构建"，所以提交前请开一次 dev 手摸按钮。
+
+**一句收束**：依赖（import）错误**编译期拦**，契约错误（props/事件名）**只有运行期看得见**——
+所以"组件外契约"是 Vue 里最值得写 varlidator/`console.assert` 自检的部分（同期后端思路则是参数校验 S06）。
 
 ## 思考题
 

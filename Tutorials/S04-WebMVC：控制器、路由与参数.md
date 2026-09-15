@@ -4,6 +4,14 @@
 >
 > 学完本课你能：看懂项目里全部路由与参数注解的真实用法；用 curl 演示 401/404/405/415/200/204 六种真实情形；理解"拦截器递参数"这种非 HTTP 渠道。
 
+## 问题出发
+
+今早调试时的两发"意外"：`PUT /api/tasks/abc` 想改个不存在的 id（我手滑打了字母）——
+Spring 没炸 500，而是精准 400；`PATCH /api/tasks` 试新方法——立刻 405。
+**两枪都由"参数与路由的绑定层"打出的**，报错 JSON 里"业务话术真空"。
+本篇讲"一次 HTTP 怎么精准落到你的方法上"，实录节把这两发打回并逐层解读——
+它们也是 S07 收编"默认错误 JSON"的现场证据。
+
 ## 本站名词卡
 
 | 名词 | 一句话人话 |
@@ -237,6 +245,51 @@ curl -s -X POST http://127.0.0.1:8082/api/chat/send -H 'Content-Type: applicatio
 ```
 
 （服务端主动说话——SSE 的具体机制另在 SSE 课程拆解，此处只见"produces 与普通 JSON 接口的差别"一眼。）
+
+## 三点五、工程实录：踩坑与修复（真机实测）
+
+### 实录：绑定层与路由层的两个"框架答话"（谁答的、何时答的）
+
+**现场复现**（2026-09-15 真机）：
+
+```bash
+# ① id 类型不匹配：{id} 是 Long，喂了个 "abc"
+curl -s -w '\nHTTP=%{http_code}\n' -X PUT http://127.0.0.1:8081/api/tasks/abc
+
+# ② 路由在、方法不在：/api/tasks 只有 G/POST/PUT/Delete 四个映射
+curl -s -w '\nHTTP=%{http_code}\n' -X PATCH http://127.0.0.1:8081/api/tasks -H 'Content-Type: application/json' -d '{}'
+```
+
+真实输出：
+
+```json
+{"timestamp":"2026-09-15T01:55:44.740+00:00","status":400,"error":"Bad Request","path":"/api/tasks/abc"}
+HTTP=400
+```
+
+```json
+{"timestamp":"2026-09-15T01:55:44.748+00:00","status":405,"error":"Method Not Allowed","path":"/api/tasks"}
+HTTP=405
+```
+
+**逐行解读（两枪有先后次序）**：
+
+| 情形 | 谁答的 | 何时答的 | 前端拿到什么 |
+|---|---|---|---|
+| 405 | `DispatcherServlet`（路由查表） | controller 方法**根本没被找到** | 框架默认 JSON，无业务话术 |
+| 400 | `HandlerMethodArgumentResolver`（绑定阶段） | 方法已匹配，参数解析炸（`MethodArgumentTypeMismatchException`） | 框架默认 JSON，无业务话术 |
+
+对照 S06 的"手写校验"一族，本项目的三条"错答"线路都在：
+
+- `@Valid` 校验失败 → 400（入口层，S06 主线）；
+- `@PathVariable` 类型不匹配 → 400（更早的绑定层，本实录）——语义都是"客户端给的东西不合法"；
+- 未知路径/错误方法 → 404/405（连方法都没进）。
+
+**排查路径**：启动日志里这几枪**一行 ERROR 都没有**（正常分流），默认 JSON 由
+`BasicErrorController` 兜底接答——这正是 S05/S07 的考点：**前端只看到 `{"error":"Bad Request"}`，
+哪个业务环节错了、该提示什么，一概不计**。
+**一句收束**：绑定层比业务层答得更早、也答得体面（状态码对）；话术则要等 S07 的
+`GlobalExceptionHandler` 补一条 `MethodArgumentTypeMismatchException → 400 + "id 必须是数字"` 才能补齐。
 
 ## 四、思考题
 

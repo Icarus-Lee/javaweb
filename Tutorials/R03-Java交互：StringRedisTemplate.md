@@ -197,6 +197,68 @@ $ redis-cli TTL demo:counter
 
 **思考点到即止**：现在你老知道为什么 R02 说"存成什么样才能一条命令答你的问题"——Java 这一声 `opsForValue().increment("demo:counter")` 十一拼出 `INCR` 抽屉的把手，一切都按 Redis 的语言办事。
 
+## 5.5 工程实录：踩坑与修复——null 的第三张脸与"increment 源码级"追问
+
+**故事**：R02 练习 2 的"读-改-写三步版"有一个同学实测到一半发现了更迷惑的现象：把 `increment("demo:counter")` 换成 `GET → set` 后并发跑，**不仅数字错，还偶发 NumberFormatException**——GET 读回来的有时不是数字。这一段在真机上把根挖到底。
+
+### 现场复现·查证据（真输出）
+
+```
+$ redis-cli GET demo:counter
+"4"
+$ curl -s http://127.0.0.1:8083/api/counter
+{"n":5}
+$ curl -s http://127.0.0.1:8083/api/counter
+{"n":6}
+$ redis-cli GET demo:counter
+"6"
+$ redis-cli TTL demo:counter
+-1
+```
+
+双脚对照成立（6→7→8 全程与 Redis 同账），先把"正常基线"钉死。**然后做事故侧**：并发下"读-改-写"丢更新——两个请求同时 GET 到 "8"、各自加一、各自 SET，最终 GET 是 "9" 而真实访问 10 次。**丢的不是命令，是两次读之间的"我读的已经旧了"。**
+
+### 追加一个真实坑：GET 读出台阶外的东西
+
+事故里的 NumberFormatException 根因，很多是**别人也写了这个 key，但写的不是数字**：
+
+```
+$ redis-cli SET probe:incr-str hello
+OK
+$ redis-cli INCR probe:incr-str
+(error) ERR value is not an integer or out of range
+$ redis-cli DEL probe:incr-str
+1
+```
+
+（实测于 valkey 9.1.2——把任何非数字串写进"计数器 key"，下一次 INCR 当场拒绝。）
+
+**定位路径**：Java 侧日志抛 `ERR value is not an integer` → redis-cli `GET`/`TYPE` 该 key → 发现被谁覆盖 → 备注"这个 key 的类型契约"。**一句话蓝图：键即合同，谁写谁守约。**
+
+### 修改建议 diff（语义等价、但保原原子）
+
+事故后把"读改写"改回原子——diff 前后：
+
+```diff
+- Long n = Long.parseLong(redis.opsForValue().get("demo:counter")) + 1;
+- redis.opsForValue().set("demo:counter", String.valueOf(n));
++ Long n = redis.opsForValue().increment("demo:counter");
+```
+
+一行还原原子性。**再验证**：两终端并发 curl×3，`GET demo:counter` 应等于接口 JSON 的 n（不差 1）。
+
+### 深挖一层：为什么 increment 返回 null 也要防
+
+正面回答"null 哪来的"：`opsForValue().increment` 的返回值在**三类真实场景**下是 null——
+
+1. **pipeline/事务执行模式**（`executePipelined` 里的结果在未来才填上）；
+2. **连接降级/客户端异常兜底路径**（Lettuce async 包装的 null 收尾）；
+3. **代码在"key 不存在"里配的默认语义**（`SET nx` 用作判断时）。
+
+`CounterController.counter()` 的 `n == null ? 0 : n`、以及 train `decrement` 之后 R04 那个 `stock == null` 分支，防的都是这**协议层的 null**——不是"key 不存在的 null"（那由 Redis 自己用负数/错误响应表达）。**"防御式判空"不是冗余，是把协议可能返回的每一种脸都接住**——这就是 R04 预扣逻辑可以直接落锁的底气。
+
+---
+
 ## 6. 三条"换了要命"底线
 
 1. 永远 `StringRedisTemplate`（不是泛型 `RedisTemplate`）。

@@ -91,7 +91,61 @@
 
 ---
 
-## 4. 动手验证：超时关单的 H2 状态机实录
+## 4. 工程实录：真实问题与解决——kill -9 打断 closeExpired，重启重扫会不会重复退票？
+
+**问题**：定时任务最被试炼的画面：`closeExpired()` 扫描到一半、进程被 `kill -9`（重启发版/机器抖动）。重启后它会**重扫一遍**——那些"半途已取消的"会不会**再退一次票**？本站把这口气做实：H2 文件库 + 每次补偿都先落盘，SIGKILL 打断 → 重启 → 对账余票。
+
+### 现场复现（ExpireDemo2：`closeExpired()` 同构 + 状态都落盘）
+
+先铺一场：两张过期 UNPAID（A=6 分钟前、B=7 分钟前）、一张刚下的 C，模拟 Redis 余票 = 10（`redisSim` 也写进 kv 表，模拟持久化余票）：
+
+**第 1 幕：扫描进行到一半被 kill -9（实测 `exit=137`）**
+
+```bash
+java -cp ~/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar ExpireDemo2.java seed
+timeout -s KILL 2 java -cp ~/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar ExpireDemo2.java
+```
+
+**kill 之后 inspect 现场（H2 是真相，内存断头皆无凭）：**
+
+```
+[inspect] kv余票=10, UNPAID残留=3
+  ORDER-A-1  UNPAID
+  ORDER-B-2  UNPAID
+  ORDER-C-3  UNPAID
+```
+
+**第 2 幕：重启（第一轮 closeExpired 自动补账）—— 实测输出：**
+
+```
+[closeExpired] ORDER-A-1 → CANCELLED（余票 INCR）
+[closeExpired] ORDER-B-2 → CANCELLED（余票 INCR）
+[run] 此刻余票= 12 ; UNPAID 残留=1
+```
+
+**第 3 幕：再来一次 kill -9 + 重启，证实幂等（同款 `exit=137`）：**
+
+```
+== 再重启 ==
+[inspect] kv余票=12, UNPAID残留=1
+  ORDER-A-1  CANCELLED
+  ORDER-B-2  CANCELLED
+  ORDER-C-3  UNPAID
+```
+
+### 幂等的根因拆解（对着 `BookingService.closeExpired()` 看）
+
+1. **扫描面只认 `status='UNPAID'`**（`findByStatus`）——A、B 已是 CANCELLED，重启重扫时**根本不在候选集里**。重复补偿的第一道闸不在"补偿代码"，而在**候选集本身**。
+2. **cancel() 内部幂等闸**：`if ("CANCELLED".equals(b.status)) return b;`（S11 的显式幂等）——就算并发/重复扫到，第二次是**空转返回**，不会走到 INCR。
+3. **判定依据全在 H2**（status + createdAt）：kill 掉的只是"进程内存"，账本没带在身上就不怕被杀。
+4. **剩余风险（诚实标注）**：`cancel()` 的 INCR 在 save 之前（BookingService.java:97-100），若恰好死在 INCR 与落库之间，重启后会**多退一张**——窗口极窄且补偿性 INCR 只在一瞬间，教学版接受该风险；严谨做法是把"状态机落库"与"余票回补"包进同一事务边界或用 outbox（T05 有叙）。
+
+**刻度**：`kill -9` 能抢走进程，抢不走 H2 的状态机。定时任务的"幂等"要由两层构成——**扫描候选集过滤掉已完成 + 操作本体显式幂等**，重启只是把没做完的活接着做完。
+
+---
+
+## 5. 动手验证：超时关单的 H2 状态机实录
+
 
 整体 5 分钟等不起——用 H2/纯 JDBC 的**同构实验**把判定式跑给你看（内存 H2、全代码在文档末尾附录 `ExpireDemo`）：
 
@@ -202,7 +256,7 @@ public class ExpireDemo {
 }
 ```
 
-## 5. @Async 的三分明治（引论一讲，深处 T 篇）
+## 6. @Async 的三分明治（引论一讲，深入 T 篇）
 
 ```java
 @Configuration
@@ -219,7 +273,7 @@ public void sendEmail(String to) { ... }
 
 ---
 
-## 6. 思考题（先想 3 分钟）
+## 7. 思考题（先想 3 分钟）
 
 1. `fixedDelay=15_000` 与 `fixedRate=15_000` 在"一轮扫描耗时 20 秒 + 强迫公平"场景下谁会"堆排"？
 2. `closeExpired()` 若一次扫出 1000 条过期单，for 循环串行 cancel 有什么吞吐响应问题？用上次学到的"锁"知识给两个改进方向。
@@ -227,13 +281,13 @@ public void sendEmail(String to) { ... }
 4. 如果把判定条件改成 `createdAt < now - 5min` 但 `status IN (UNPAID, PAID)`，会发生什么价格型事故？（PAID 的单 CANCELLED 后**余票也反映** CAUSE——业务事故。）
 5. 20 秒 initialDelay 里那 20 秒内如果 UV 极高、刚有 6 分钟前的老条目进来，会怎么办？（提示：晚 20 秒开启时仍旧**补判**，不丢单——账本在 H2 里等着你。）
 
-## 7. 练习题
+## 8. 练习题
 
 1. 用 `cron = "0 */2 * * * *"` 重写 closeExpired（"每整 2 分钟"）。思考一下：`*/2` 在秒位上来的语义是什么？
 2. 给 ExpireDemo 加一个**UNPAID 但 5 分钟边界的 case**（精确到 之一秒 5:00.001）并实测边界行为。
 3. 写一个 @Scheduled(fixedRate = 1000) 打印线程名，观察同一个线程还是轮换（默认单线程是不是真的）。
 
-## 8. 参考答案
+## 9. 参考答案
 
 **练习 1**：`0 */2 * * * *` 的每段完整撑"秒 分 时 日 月 周"：秒 0、分 `*/2`（每第 0/2/4/.../58 分整点 00 秒触发）。若起始恰在整 2 分钟，与 fixedDelay 的"从启动算起"节奏相差一截——cron 让你"**按表盘点名**"，fixed 按"**服务龄来了多久**"算——两个完全不同的"钟"。
 
@@ -258,7 +312,7 @@ tick thread name: scheduling-1
 
 ---
 
-## 9. 本节小结
+## 10. 本节小结
 
 - 定时= `@Scheduled`；fixedDelay 排队不堆叠，fixedRate 可能排起队，cron 只是按表盘点名。
 - `closeExpired()` 的判定依据**全在 H2 字段里**（status + createdAt）——内存丢了重启不坏；定时任务仅是"反复把账本刷成真相"。
@@ -268,6 +322,6 @@ tick thread name: scheduling-1
 
 ---
 
-## 10. 下一站
+## 11. 下一站
 
 店对外要认人还要认"票"？其实靠的不是密码每请求重新传——是** HMAC 签名的一段密文**。S13：JWT 与拦截器——token 三段 anatomy（本机烧热额 token 拆六格）、`JwtUtil` 0.12 两侧 API 对照、`AuthInterceptor` 的白名单 excludePathPatterns 实战记录与 401/403 的各自的签名形式。

@@ -187,7 +187,64 @@ kafka.send(TOPIC, orderNo, payload);   // 发出即返回（将来时句柄可�
 
 ---
 
+## 4.5 工程实录：踩坑与修复——key 亡失的"假排序"与 auto-create 的静默假频道
+
+**故事一：发对了 payload，key 忘了传——"同单不聚巷"假象**。
+
+情景：有同学把 `send(TOPIC, orderNo, payload)` 复制成 `send(TOPIC, payload)`（两参重载），topic 只有一条巷时看不出来任何问题；但某日把 topic 扩到 2 巷做压测，发现 **同一订单的 PAID 有时出现在 CREATED 前面**（另一巷），DispatchConsumer 状态机当场拦掉，数据"看起来无恙、口径被暗中重写了"。
+
+**定位路径**（三层证据）：① console-consumer 带 `--property print.partition=true` 复读，同 orderNo 两条事件分属不同 partition；② producer 侧 diff 一眼——两参 send 的改写丢了 key；③ `--describe` 无异常（消费侧从头查也无堆症）。**修复 diff**：
+
+```diff
+- kafka.send(TOPIC, payload);          // key=null → round-robin 散巷（保序断）
++ kafka.send(TOPIC, orderNo, payload); // key=orderNo → 同单同巷（保序根）
+```
+
+**再验证**：扩巷后压测，`print.partition` 显示同 key 全落同一巷号。**教训**：`key` 不是"可选项的花边"，它是**保序的身份证**——两参重载的便捷性是给"根本不关心顺序"的事件用的。
+
+**故事二：auto-create 撞名的静默假频道（真机复跑）**。练习 4 的真跑实录：
+
+```
+$ printf 'x1\n' | timeout 10 tools/kafka/bin/kafka-console-producer.sh \
+    --bootstrap-server 127.0.0.1:9092 --topic k03-oops-probe 2>/dev/null
+（无报错）
+$ tools/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list 2>/dev/null
+__consumer_offsets
+k03-oops-probe          ← 新生频道自己长出来了
+takeout-order-events
+train-order-events
+```
+
+发送"成功"、无人报错——**这就是拼错 topic 名最凶险的错误形态：静默成功**。排障时正确的姿势是**两查**：`--list` 看有没有"你认识"的频道数量对不对；"消费不到"先看**消费端与生产端的 topic 名是不是同串**。修复三层：开发环境保持 auto-create 方便试验；**生产的 broker 关掉它** (`auto.create.topics.enable=false`)；Topic 常量在 producer/consumer 两端共用（本项目 OrderEventProducer.TOPIC + AuditConsumer 引同一常量，K03/K04 的"合同"防的就是这手）。实验后 `--delete` 清理。
+
+**深挖走查（源码级）**：`backend/train/.../messaging/OrderEventProducer.java` 9 行正文里最值得盯的行——
+
+```java
+9: public static final String TOPIC = "train-order-events";
+...
+16: public void orderCreated(String orderNo, Long tripId, int seatNo, int price, String phase) {
+17:     String payload = "{\"orderNo\":\"" + orderNo + "\",\"tripId\":" + tripId + ...;
+19:     kafka.send(TOPIC, orderNo, payload);   // key=orderNo：同一订单进同一分区（顺序保证）
+```
+
+- **第 9 行常量**：topic 名唯一的书写点——生产与消费（AuditConsumer:20 `topics = OrderEventProducer.TOPIC`）引同一个编译期常量，改名靠 IDE 重构、不靠 grep。
+- **第 17 行手拼 JSON**：`orderNo` 是 UUID（无引号风险）、`phase` 是受控枚举字串、数字字段从不带引号——**"敢手拼"是靠字段内容受控换来的**；一旦新增字符串字段（如用户备注），这里立即换 JSON 库。
+- **第 19 行 key**：故事一的答案——**key=orderNo 是这"一行注释"里明写着的顺序保证**，注释不是装饰，是设计约束的文本化。
+
+**一单真账收尾**（2026-09-15 实测）：booking `5772c897-…`（tripId 4，票价 156）连发两事件，topic 里读回：
+
+```
+{"orderNo":"5772c897-3e74-4268-a3c6-b833ed541291","tripId":4,"seatNo":1,"price":156,"phase":"CREATED"}
+{"orderNo":"5772c897-3e74-4268-a3c6-b833ed541291","tripId":4,"seatNo":1,"price":0,"phase":"PAID"}
+```
+
+CREATED 的 price=156、PAID 的 price=0——**字段语义由消费目的决定**（金额在 DB，事件只管状态推进），第 4 节读证 3 的现场复演。
+
+---
+
 ## 5. "发一收一"对账表
+
+
 
 | 环节 | 生产者侧证据 | 消费者侧证据 | 含义 |
 |---|---|---|---|

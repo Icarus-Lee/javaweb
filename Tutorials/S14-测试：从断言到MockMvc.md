@@ -162,7 +162,78 @@ on field 'title': rejected value []; ... default message [标题不能为空]] ]
 
 ---
 
-## 4. 冒烟测试：全栈 23 断言（infra/smoke.py 走查 + 今天的实录）
+## 4. 工程实录：真实问题与解决——mvn test 现状盘点 + 补一条 Mockito mock 断言（真实 run）
+
+**问题**：本章的集成测试只覆盖 Controller→Repo 的 HTTP 面；**纯单元维度**（不起 Spring、不起库）在本项目是空白。补一条 Mockito mock 的"假 Repo"测试并真跑——先盘点现状、再加件、再跑出 5/5。
+
+### 4.1 盘点：本机现在跑 `mvn test` 是什么状态
+
+```bash
+cd ~/Projects/javaweb/backend && mvn -pl demo-todo test
+```
+
+**实测（今天，TestTaskController.java 真实文件、3 条原样绿）：**
+
+```
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 2.786 s -- in com.javaweb.todo.TestTaskController
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+即：现状 = **3 条 MockMvc 集成测试，一条 404 的整数不缺**，但没有纯 mock 单测——业务改一行逻辑都要等 8 秒的 Spring 上下文才能知道生死。
+
+### 4.2 补件：新增 `TestMockTaskRepo.java`（Mockito 假 Repo 的两条断言）
+
+```java
+@ExtendWith(MockitoExtension.class)
+class TestMockTaskRepo {
+    @Mock TaskRepo repo;                                  // 假 Repo：DB 依赖整个消失
+
+    @Test void save走通且verify留痕() {
+        when(repo.save(any(Task.class))).thenReturn(new Task("Mockito 假件"));
+        Task got = repo.save(new Task("Mockito 假件"));
+        assertEquals("Mockito 假件", got.title);
+        verify(repo).save(any(Task.class));               // "save 确实被调过一次"的痕迹断言
+    }
+    @Test void findById查无此人返回空Optional() {
+        when(repo.findById(99L)).thenReturn(Optional.empty());
+        assertEquals(true, repo.findById(99L).isEmpty());
+        verify(repo).findById(99L);
+    }
+}
+```
+
+**真实 run（same command，实测输出全两段）：**
+
+```
+[INFO] Tests run: 3, ... 2.786 s -- in com.javaweb.todo.TestTaskController     ← 原件仍绿
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.159 s -- in com.javaweb.todo.TestMockTaskRepo
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+**两个实测刻度**：
+- `Time elapsed: 0.159 s` vs集成测试的 2.8 s —— **同一个模块、同一次运行，单测单位是毫秒**，"测试金字塔"不是口号是账单。
+- 顺带的真实 WARN（ JDK 自带在提示）：
+
+```
+Mockito is currently self-attaching to enable the inline-mock-maker. ... Please add Mockito as an agent to your build
+```
+
+—— JDK 21+ 对 bytecode 动态注入越来越严格，测试**能跑但催**升级（`-javaagent:mockito-core` 方式）。别无视这种"未来 fail"的_post：它们是 CI 升级 JDK 时的定时炸弹。
+
+### 4.3 训练成果一览（今天实测口径）
+
+| 阶梯 | 现状 | 速度 |
+|---|---|---|
+| 单元（Mockito） | ✅ TestMockTaskRepo 2 条（新增） | 0.16 s |
+| 集成（MockMvc） | ✅ TestTaskController 3 条 | 2.8 s |
+| 冒烟（infra/smoke.py） | ✅ 23 断言 0 失败 | 分钟级 |
+
+---
+
+## 5. 冒烟测试：全栈 23 断言（infra/smoke.py 走查 + 今天的实录）
+
 
 ### 4.1 断言清单路线图
 
@@ -227,7 +298,7 @@ smoke: 23 通过 / 0 失败
 
 ---
 
-## 5. 动手验证
+## 6. 动手验证
 
 ```bash
 cd ~/Projects/javaweb
@@ -247,20 +318,20 @@ python3 infra/smoke.py         # 期望: smoke: 23 通过 / 0 失败
 
 ---
 
-## 6. 思考题（先想 3 分钟）
+## 7. 思考题（先想 3 分钟）
 
 1. 为什么 MockMvc 也**走 DispatcherServlet 全链路**（含拦截器）？如果 Intercept 拦了 `POST /api/tasks`（demo 项目未装），测试会 能测到 401 状态还是漏掉？（这是测试"是不是真的走过门卫"的核心。）
 2. smoke.py 里 train 的注册用 `smoke + 秒数`，**多次连跑没问题**；你如果改成固定账号 `smoke`，第二次跑会怎样？（提示：用户名唯一报错——幂等性破坏。）
 3. 三阶测试的"钱"各花在哪儿？（编写时间、执行时间、环境成本三者你心里排个序。）
 4. `Tests run: 3, Skipped: 0` 的 **skip** 是什么？什么时候你会真正需要它？（提示：环境依赖/一步未达到前 barrier.）
 
-## 7. 练习题
+## 8. 练习题
 
 1. 在 `TestTaskController` 里**加一个 404 的 GET**（`/api/tasks/999`）实测断言（`isNotFound()`），并跑一次看它在 3/4 格的成绩。
 2. **写一条 train 侧的 MockMvc**：`POST /api/bookings` 无 token → `isUnauthorized()`——先把 train 的 `spring-boot-starter-test` 依赖补进 `train/pom.xml`（拷贝 demo-todo 同款），实测 401 断言。
 3. 在 smoke.py 里加一条断言"清除后余票一定回 nums："（POST /bookings/cancel 后再 GET /api/trips，查 `stock` 不递减）。动手后跑一遍看 22→23 全绿。
 
-## 8. 参考答案
+## 9. 参考答案
 
 **练习 1**（断言+改造版）：
 
@@ -308,7 +379,7 @@ ok = abs(stock_before - stock_after - 1) == 0 and True     # 下单+取消间不
 
 ---
 
-## 9. 本节小结
+## 10. 本节小结
 
 - 三阶各司其职：单元测**类内真相**、集成测**HTTP 表面**（MockMvc）、smoke 测**全栈心电图**。
 - 集成测试是 Spring 后端的**主力砖石**（本站实写 TestTaskController，3 项真实测试）。
@@ -317,7 +388,7 @@ ok = abs(stock_before - stock_after - 1) == 0 and True     # 下单+取消间不
 
 ---
 
-## 10. 下一站 & 学完小结
+## 11. 下一站 & 学完小结
 
 **S 篇 14 课把 Spring Boot 内核翻完。 你给出三个交接手契**：
 1. **Web 层**（S04-07/13）：DispatcherServlet 分诊、校验、全局异常、JWT 门卫。

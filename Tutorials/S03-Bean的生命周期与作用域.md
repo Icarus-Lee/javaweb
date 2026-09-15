@@ -4,6 +4,13 @@
 >
 > 学完本课你将能：判断一个 Bean 该用哪种作用域；看懂优雅停机日志里的销毁顺序；从容处理"两个实现争一个位置"的启动失败。
 
+## 问题出发
+
+"两个实现争一个位置"不是教材习题，我在写本课实录的当天就原生踩到：demo-counter 里同时挂了
+`PushNotifier` 与 `EmailNotifier` 两个 `@Component`，注入点一开，容器**当场拒绝发货**——
+连覆写一句自我介绍的机会都没有。加上记其后的第二条：`pkill -f` 自杀式匹配把治理自己的**worker 脚本也给杀了**。
+本篇讲"编制与生死"，在第三与第五节各给一条真机上可以在 10 分钟内复现的实录。
+
 ## 本站名词卡
 
 | 名词 | 一句话人话 |
@@ -223,6 +230,70 @@ curl -s -o /dev/null -w 'HTTP=%{http_code}\n' -m 5 http://127.0.0.1:8081/api/tas
 ### 4）prototype 思想自测（不写代码的验证）
 
 问自己：若把 `ChatController` 干成 prototype，SSE 推送会怎样？——思考后看本章末尾参考答案的第 2 条。
+
+## 五、工程实录：踩坑与修复（真机实测）
+
+### 实录 1：两个候选 Bean——从容器拒答到 @Primary 复绿（含真实 diff）
+
+**现场复现**（demo-counter 真机 2026-09-15 12:50；临时教学类已还原）：
+
+```bash
+cd ~/Projects/javaweb/backend && source ../infra/env.sh
+timeout 25 java -jar demo-counter/target/demo-counter-1.0.0.jar 2>&1 | head -50
+```
+
+真实输出（摘要，WARN 那行一字未改）：
+
+```text
+WARN ... Exception encountered during context initialization - cancelling refresh attempt:
+  UnsatisfiedDependencyException: Error creating bean with name 'helloGate' ...
+  Unsatisfied dependency expressed through constructor parameter 0:
+  No qualifying bean of type 'com.javaweb.counter.temp.Notifier' available:
+  expected single matching bean but found 2: emailNotifier,pushNotifier
+...
+APPLICATION FAILED TO START
+Description:
+Parameter 0 of constructor in ...HelloGate required a single bean, but 2 were found:
+	- emailNotifier: defined in URL [.../EmailNotifier.class]
+	- pushNotifier: defined in URL [.../PushNotifier.class]
+```
+
+**读法**：这报错甚至把**两个候选人的定义出处（jar 内 class 路径）**都出示了——多候选时排查零盲区。
+**修复（diff 前后）**：
+
+```diff
+- public class PushNotifier implements Notifier {
++ @Primary            // import org.springframework.context.annotation.Primary;
++ public class PushNotifier implements Notifier {
+```
+
+**修复后真机输出**：
+
+```text
+INFO ... com.javaweb.counter.temp.HelloGate : 注入到的 Notifier = PushNotifier
+INFO ... CounterApp : Started CounterApp in 1.382 seconds (process running for 1.645)
+```
+
+修复后 `curl :8083/api/counter` → `{"n":6}`（服务直通复绿）。
+
+### 实录 2：自杀式 pkill——一脚踩进作者同款坑
+
+**问题**：起服务/重生服务的习惯写法 `pkill -f demo-counter`——**把自己的启动外壳一并杀了**：
+`pkill -f` 匹配的是**命令行整行**，我的 bash 测试命令行本身含 "demo-counter"（jar 路径），
+于是 pkill 把当前 shell 进程一起干掉，`timeout 25 java …` 随即挂了，log 也半途而废。
+（我复现"启动失败"时亲眼见到：一条 `tail` 结果里混杂着旧日的 ConnectionWatchdog 与本次的
+`ClassNotFoundException: ch.qos.logback...`——**半途被杀的进程日志就是这种"叠影"**，先洗牌再读。）
+
+**修复**：进程匹配**永远别用裸词**——把首字母换成 `[)]` 变体（拼接变量）或用 pid 文件：
+
+```bash
+pkill -f "[d]emo-counter"      # 拼接变量：命令行里没有"demo-counter"字面量，不会再命中自己
+# 或
+kill $(cat logs/demo-counter.pid)
+```
+
+**一句收束**：`pkill -f` 是正则匹配整条命令行，而**我自己就在那条命令行里**——和 SQL 注入同一个心法：
+凡"匹配他人"的代码，先想想会不会匹配到自己。
 
 ## 思考题
 1. 为什么 demo-todo 的 `TaskRepo` Bean **没有**写 `@PreDestroy` 关数据库连接，也从不泄漏？连接的生命周期由谁在管？（提示：HikariDataSource 是谁的 Bean，被谁的销毁序列关掉）

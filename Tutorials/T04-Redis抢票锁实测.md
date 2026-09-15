@@ -247,6 +247,63 @@ ORDERS | MIN_SEAT | MAX_SEAT | DISTINCT_SEATS
 
 ---
 
+## 6.6 工程实录：真实问题与解决——锁 TTL 缩到 1ms，重入竞态实打实测（repeat test）
+
+**问题从哪来**：T03 第 2 节立了"锁 + TTL 10s"的设计，但 TTL 到底"多短才危险"？口说无凭。我给 `BookingService` 打了个实验版补丁（不改生产 jar：源码改两行 → 单独 build → 用 18087 端口另起一台，跑完复原；**动生产文件前先抄走再还原**）：
+
+```diff
+-    Boolean locked = redis.opsForValue()
+-            .setIfAbsent(lockKey, "1", Duration.ofSeconds(10));
++    Boolean locked = redis.opsForValue()
++            .setIfAbsent(lockKey, "1", Duration.ofMillis(1));    // ← TTL 缩到 1ms
+```
+
+### 实验前的"锁存在感探针"（同一动作，两个实例各测一次）
+
+下单的同时在 Redis 侧做 2ms 一次的 TTL 探测（两实例同一动作）：
+
+```
+锁 TTL=10s（8084，t+0.010s 命中）          ← 锁真的活着，寿 10 秒
+锁 TTL=:0（18087 实验版，t+0.008s 命中）   ← 1ms 的 TTL 被 Redis 取整显示 0——锁眨眼即逝
+```
+
+### 重复实验：100 线程抢 5 票，两种锁同一脚本
+
+| | 健康锁（10s TTL，8084） | 失效锁（1ms TTL，18087） |
+|---|---|---|
+| HTTP 侧 | 成功 5 / 拒绝 95 | H2 实际落库 5 单（座位 11~15 连续无重复）／客户端尽收 95 个拒绝 |
+| 拒绝分布（日志事件计数） | **手速太快 ×86 ／ 已售罄 ×9** | **手速太快 ×77 ／ 已售罄 ×28** |
+| H2 单账 | 5 单 | 5 单 |
+
+读法（这组数字才是本实录的心脏）：
+
+1. **拒绝结构换了形状**：正常锁的窗口长，95 个后来者几乎全撞在"锁口"（86 手速太快）；1ms 锁眨眼就蒸发，**大量请求穿过"不存在"的锁直接打进 DECR**——"已售罄"事件从 9 跳到 28（3 倍）。互斥窗流失了多少，数出来的这 19 条就是失血量；
+2. **超卖依然是 0**：H2 侧两轮都是整数 5 单、座位连续不重复——**DECR+负数守卫这道底闸把"锁失效"的灾难兜住了**。这就是 T03 说"锁不防超卖，原子扣减防"的实测后续：锁坏了，账还守住；但"临界区只剩我一个人"的承诺没了，多步交织的窗口打开（所幸本实验七步都足够小，没撞出交错残局）；
+3. **误删他人锁的理论窗口变成常态**：A 抢到锁后 1ms 即过期，A 跑完业务再 `finally delete` 时，删掉的早已是 B 的锁——锁值固定 `"1"` 的问题（T03 5.3）从"理论可能"变成"每单必发生"，只是本实验里没人踩雷（下一个请求都能重新抢到新锁）。
+
+**修复 = 延长 TTL + 点检加锁逻辑**（把实验 jar 换回 10s 版即复现"健康锁"一切数字）；生产级进阶：锁值存随机 ID + 删前 Lua 校验（防误删）、看门狗续约（Redisson）。**记住这一课的目的是校准"锁到底在防什么"——兜底永远在 DECR，锁保护的是"七步不被切成互不相识的片段"。**
+
+### 复现底稿（想重跑这张表的完整命令链）
+
+```bash
+# 1) 改实验补丁（diff 见 6.6 开头）→ 单独编译
+cd backend && mvn -q -T 4 -DskipTests package && cd ..
+cp backend/train/target/train-1.0.0.jar /tmp/opencode/train-exp.jar   # 实验版留档
+# 2) 还原源码再 rebuild（保证生产 target 永远是"与源码一致"的版本）
+mvn -q -T 4 -DskipTests package
+# 3) 实验版独占端口起台（独立 H2 文件避免与主库相干）
+nohup java -jar /tmp/opencode/train-exp.jar --server.port=18087 \
+  -Dspring.datasource.url='jdbc:h2:file:/tmp/opencode/train4exp;AUTO_SERVER=TRUE' \
+  --spring.datasource.url='jdbc:h2:file:/tmp/opencode/train4exp;AUTO_SERVER=TRUE' \
+  > /tmp/opencode/train4.log 2>&1 &
+# 4) 同一 rush10.py 已跑健康与失效两种锁（参数对调：PORT 8084 → 18087）
+# 5) 排查代码：从 tail 里的 [audit] 计数到 grep -c '已售罄'
+```
+
+> **一个不给糖只给毒的提醒**：`mvn package` 会把 target/train.jar 直接换掉——**正在跑的 JVM 会懒加载 jar 里的字节**，下次缺某个类直接 `NoClassDefFoundError`（N04 工程实录里实录过这条 core dump 路的心跳）——先停进程，再 rebuild，再启动，一线纪律，简单到不值得写进 README，可怕到值得刻进肌肉。
+
+---
+
 ## 7. 常见坑清单（写并发实验时自己踩过的）
 
 | 症状 | 根因 | 修法 |

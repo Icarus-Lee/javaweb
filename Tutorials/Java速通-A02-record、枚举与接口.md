@@ -1,179 +1,174 @@
 # Java速通-A02 · record、枚举与接口
 
-> C++ 里你会为"一个只装数据的 struct"写构造函数、比较运算符、哈希；Java 16 之前更惨（还要写 getter/equals/hashCode）。record 一行全解决。这一站还讲 enum 和 interface——以及一个关键边界：**为什么 JPA 实体不能是 record**。
-
----
+> 三行件头：①要点——record 一行生成全套；enum 是会做事的常量；interface 是能力契约；②前置——A01 的引用语义；会 C++ 的 struct/enum class；③产出——**亲历一次"record 当 JPA 实体"的编译报错真代码**，把"过路壳用 record、住店实体用 class"的边界用实测钉死。
+>
+> 🗺 主线进度：Java 速通第 2 站 | 🎞 上一站：A01 类与对象 | 📀 本站所得：record 的一刀边界 + enum/interface 的用法。
 
 ## 🎬 开篇三件套
 
-### 1️⃣ 本站你走在大厅哪一格
+### 你在哪格 + 任务单
+你在大厅窗口前学做"单据模板"（record）。任务：①会写 record；②会用 enum（比 C++ enum class 强在哪）；③会 interface/default；④想清 JPA 实体与 record 的边界；⑤写一个 BookReq 在 demo01 对照。
 
-票务大厅的窗口上贴着几张"单据模板"：下单要填"车次号"（BookReq）、注册要填"用户名+密码"（RegisterReq）——这些**只读数据壳**就是 record。而订单状态 `UNPAID/PAID/CANCELLED` 这种"有限几种取值"就是 enum 的地盘。本站你在大厅窗口前，学做单据模板。
-
-### 2️⃣ 本站任务单
-
-1. 会写 record，理解它自动生成的构件（构造器/访问器/equals/hashCode/toString）；
-2. 会用 enum，知道它比 C++ enum class 强在哪；
-3. 会定义接口、理解 default 方法；
-4. 想清楚 JPA 实体（class Task）与 record 的边界：谁 mutable 谁 immutable；
-5. 动手：写一个 `BookReq`，在 demo01 场景里对照使用。
-
-### 3️⃣ 开工前自查
-
-- [ ] A01 的类/构造器/引用语义已消化
-- [ ] 知道 C++ 的 struct 与 enum class
+### 开工前自查
+- [ ] A01 已消化
+- [ ] 知道 struct/enum class
 - [ ] jshell 可用
 
 ---
 
-## 🗂 本站名词卡
+## 名词卡
 
 | 名词 | 人话 | C++ 对照 |
 |---|---|---|
-| **record** | 不可变数据壳：一行声明自动生成构造/访问器/equals/hashCode/toString | 带全成员初始化的 struct + 自动生成的 ==/hash |
-| **不可变（immutable）** | 创建后字段不许改 | const 成员的 struct |
-| **访问器** | `name()` 而不是 `getName()`（record 风格） | getter |
-| **enum** | 类型安全的"有限取值集合"，可带字段和方法 | enum class 的加强版 |
-| **interface** | 方法签名清单，谁 implement 谁兑现 | 抽象基类（但无字段） |
-| **default 方法** | 接口里带默认实现的方法 | C++ 抽象类里的非纯虚函数 |
-| **@Override** | 标注"我在重写父类/接口方法"，拼错编译器报警 | override 关键字 |
+| **record** | 不可变数据壳，一行顶十行 | 全成员 const 的 struct + 自动 ==/hash |
+| **不可变** | 建后字段不许改 | const |
+| **访问器** | `name()` 不是 getName() | getter |
+| **enum** | 类型安全有限取值，可带方法 | enum class 加强版 |
+| **interface** | 方法签名清单 | 抽象基类（无字段） |
+| **default 方法** | 接口带默认实现 | 抽象类非纯虚函数 |
+| **@Override** | 编译器报警拼错 | override |
 
----
+## 1. 概念最小人话
 
-## 🧠 概念人话
-
-### record：一行顶十行
-
-```java
-public record BookReq(Long tripId) {}
-```
-
-编译器自动给你生成：
-
-1. **不可变字段** `private final Long tripId;`
-2. **全参构造器** `new BookReq(1L)`
-3. **访问器** `req.tripId()`（不是 `getTripId()`）
-4. **equals + hashCode**（按所有字段）
-5. **toString**（`BookReq[tripId=1]`）
-
-C++ 等价物是"struct + 编译器生成的比较"，但 C++ struct 默认**可变**；record 天生 final。当你要"在方法间搬运一坨数据且不想被改"时，record 是首选。
-
-### enum：会做事的常量
-
-```java
-enum OrderStatus { UNPAID, PAID, CANCELLED }
-```
-
-比 C++ enum class 强的地方：
-
-- 自带 `values()`、`valueOf("PAID")`、`name()`、`ordinal()`；
-- 可以带字段和方法（每个枚举值一个实例）；
-- 是真正的类：能进集合、能 switch（Java 21 的 switch 还能带返回值）；
-- 类型安全：`OrderStatus s = "PAID"` 编译不过，C++ 的 int 枚举混用问题消失。
-
-### 接口与 default 方法
+record：一行 `public record BookReq(Long tripId) {}` 白送五件套：private final 字段、全参构造器、访问器 `tripId()`、equals+hashCode（按字段）、toString（`BookReq[tripId=1]`）。C++ struct 默认可变，record 天生 final。
+enum：自带 `values()/valueOf()/name()/ordinal()`，可带字段方法（每个枚举值一个实例），能进集合、能 switch（Java 21 的 switch 还能带返回值）——`OrderStatus s = "PAID"` 编译不过，C++ 的 int 枚举混用问题消失。
+interface + default：类可 implements 多个（弥补单继承）；接口之间 default 冲突有仲裁规则。**try-with-resources 靠 `AutoCloseable` 一个方法接口工作（A04）**——接口在这里是"能力申请表"。
 
 ```java
 interface Closeable2 {
-    void close();                          // 抽象方法：实现者必须兑现
+    void close();                          // 抽象：实现者必须兑现
     default void closeQuietly() {          // default：白送一个默认实现
         try { close(); } catch (Exception ignored) {}
     }
 }
 ```
 
-C++ 里这叫抽象基类的非虚函数。Java 类可以 implements 多个接口（弥补单继承），接口之间还能互相 default 冲突仲裁。**A04 会看到**：try-with-resources 正是靠 `AutoCloseable` 这个单方法接口工作的。
+## 2. 真实代码走查
 
----
+### record 遍地开花
 
-## 🔍 真实代码走查
-
-### record 在本项目遍地开花
-
-**BookingController.java:27-28**——下单请求壳：
+**BookingController.java:27-28**：
 
 ```java
 27:     public record BookReq(Long tripId) {}
 28:     public record OrderOnlyReq(String orderNo) {}
 ```
 
-**AuthController.java:28-29**——注册/登录请求壳（还带校验注解）：
+**AuthController.java:28-29**（带校验注解）：
 
 ```java
 28:     public record RegisterReq(@NotBlank String username, @NotBlank String password) {}
-29:     public record LoginReq(@NotBlank String username, @NotBlank String password) {}
 ```
 
-**BookingService.java:33**——服务层返回壳：
-
-```java
-33:     public record BookResult(String orderNo, int seatNo) {}
-```
-
-用法（BookingController.java:32-34）：
-
-```java
-32:     public Booking book(@RequestBody BookReq req, HttpServletRequest http) {
-33:         Long uid = (Long) http.getAttribute("uid");
-34:         return service.book(uid, req.tripId());   ← 访问器是 tripId() 无 get 前缀
-```
-
-Spring Boot 收到 JSON `{"tripId":1}` 时，自动用 record 的全参构造器反序列化；返回 `BookResult` 时自动读访问器序列化。**record + JSON 是天作之合**。
+**BookingService.java:33**：`public record BookResult(String orderNo, int seatNo) {}`
+用法（BookingController.java:32-34）：反序列化 `{"tripId":1}` 自动走 record 的全参构造器；序列化自动读访问器。**record + JSON 天作之合**。
 
 ### 枚举的影子：String 状态的"穷人版"
 
-Booking.java 的状态字段是 String：
+Booking.java 的状态是 String：`/** UNPAID/PAID/CANCELLED */ public String status;`。教学版省一层 JPA 映射；注释里写明取值集合——**String 字段取值有限 = 本该是 enum** 的信号。
 
-```java
-// backend/train/.../model/Booking.java
-/** UNPAID=未支付 / PAID=已支付 / CANCELLED=已取消（含超时关单） */
-public String status;
-```
-
-教学版故意用 String（省一层 JPA 映射配置），但注释里明说了取值集合——这就是"本该是 enum"的信号。生产代码会写 `@Enumerated(EnumType.STRING) OrderStatus status;`。**看到 String 字段取值有限，就该想到 enum。**
-
-### 接口的震撼教育：TaskRepo 一行八件事
+### interface 一行八件事：TaskRepo
 
 ```java
 // backend/demo-todo/.../repo/TaskRepo.java（全 8 行）
-7: public interface TaskRepo extends JpaRepository<Task, Long> {
-8: }
+7: public interface TaskRepo extends JpaRepository<Task, Long> {}
 ```
 
-空接口继承 `JpaRepository`，立刻白得 `findAll()/findById()/save()/deleteById()/existsById()` 等几十个方法——Spring Data 在运行时**动态生成实现**。接口在这里不是"方法签名清单"，而是"能力申请表"。TaskController 里用到的每个 repo 方法（TaskController.java:23/29/34/44/45）都来自这行继承。
+空接口继承白得 findAll/findById/save/deleteById/existsById 等几十个方法——Spring Data 运行时**动态生成实现**（反射+字节码，不是 C++ 模板的编译期）。TaskController.java:23/29/34/44/45 用到的每个 repo 方法都来自这行继承。
 
-### 边界：JPA 实体为什么不能是 record
+**本站真实语境里的 record 常见造型**（均在源码可查）：
 
-对照 Task.java（A01 已读）：
+| 项目位置 | record | 角色 |
+|---|---|---|
+| BookingController.java:27 | `BookReq(Long tripId)` | 下单请求壳 |
+| AuthController.java:28 | `RegisterReq(username, password)` | 注册壳+校验注解 |
+| BookingService.java:33 | `BookResult(orderNo, seatNo)` | 服务层返回壳 |
+| BookingController.java:28 | `OrderOnlyReq(orderNo)` | 支付/取消请求壳 |
+
+## 3. 工程实录：把 Booking model 改成 record 的尝试（真编译报错）
+
+**动机关**：A01 说过"JPA 实体四条硬要求"（无参构造、字段可变、可被代理、反射可访问）。这次真把一条"住店实体"随手改成 record，亲眼看报错——比十行说教有效。
+
+### 3.1 直接翻车版（编译期）
+
+**动机关**：上篇说了"JPA 实体有四条硬要求"（无参构造、字段可变、可被代理、可反射访问）。今天真的把一条"住店实体"随手改成 record，亲眼看报错——比十行说教有效。
+
+### 3.1 直接翻车版
+
+`/tmp/opencode/RecordCompile.java`：
+
+```java
+public class RecordCompile {
+    record Task(Long id, String title, boolean done) {}    // 顺手把 Task 记成 record
+    void m(Task t) {
+        t.done = true;                    // ← 大胆改字段：任务难 inverted！
+    }
+    public static void main(String[] a) {}
+}
+```
+
+编译器原声（本机 javac 21/26 输出一字不差）：
+
+```
+RecordCompile.java:4: error: cannot assign a value to final variable done
+        t.done = true;
+         ^
+1 error
+```
+
+**读报错**：record 的 component 全是 **final 变量**——赋值直接被拒。而 TaskController.java:36 的 `t.done = !t.done;`（"翻转完成"业务）是本项目真实需求，第一刀就否决。
+
+排查路径：看到 `cannot assign a value to final variable` 的第一反应不是想"绕过 final"，而是**改回 class**——因为这不是 bug，是设计分界（record 的语义就是不可变）。
+
+### 3.2 运行期翻车版（证明"没有无参构造"）
+
+`/tmp/opencode/RecordTry.java`（当 JPA 想"先 new 一个空对象再填字段"时）：
+
+```java
+public class RecordTry {
+    public record Task(Long id, String title, boolean done) {}
+    public static void main(String[] a) {
+        try {
+            Task.class.getDeclaredConstructor().newInstance();   // JPA 式"无参构造"
+        } catch (Exception e) {
+            System.out.println("no-arg ctor -> " + e);
+        }
+    }
+}
+```
+
+真跑输出：
+
+```
+no-arg ctor -> java.lang.NoSuchMethodException: RecordTry$Task.<init>()
+```
+
+record 编译器**根本不生成无参构造**（它保证的是"全参建 + final 字段"），JPA 第一步就翻车。两刀合并，JPA 实体用 record 的判决书：
 
 | 需求 | record 给的 | JPA 要的 |
 |---|---|---|
-| 无参构造 | ❌ 只有全参 final 构造 | ✅ 必须有无参构造（Task.java:20） |
-| 字段可改 | ❌ 全 final | ✅ `t.done = !t.done`（TaskController.java:36） |
-| 代理/懒加载 | ❌ final 类不好继承代理 | ✅ 框架要生成子类 |
+| 无参构造 | ❌ 只有全参 final 构造 | ✅ 必要（Task.java:20） |
+| 字段可改 | ❌ final（编期拦截，实录 3.1） | ✅ `t.done = !t.done` |
+| 代理/懒加载 | ❌ final 类不便生成子类代理 | ✅ Hibernate 生成子类 |
 
-TaskController.java:36 的 `t.done = !t.done;` 直接否决 record——**记录要被修改，record 天生不可变**。口诀：**"过路的 JSON 壳用 record，住店的数据实体用 class"**。
+口诀（这次是"动手过后"自己品的）：**过路的 JSON 壳用 record，住店的数据实体用 class**。
 
----
-
-## 动手验证
-
-### 实验 1：record 的自动构件（jshell 真实体验）
+### 3.3 record 好用的一面（顺手一跑）
 
 ```java
 jshell> record BookReq(Long tripId) {}
 jshell> var r = new BookReq(1L)
-jshell> r.tripId()
-$3 ==> 1
 jshell> r
 $4 ==> BookReq[tripId=1]              ← 自动 toString
 jshell> r.equals(new BookReq(1L))
 $5 ==> true                           ← 按字段比较
 jshell> r.tripId = 2L
-|  错误：无法将变量 tripId 指定为...（final，不可赋值）
+|  错误：无法将变量 tripId 赋值（final，不可赋）
 ```
 
-### 实验 2：enum 的开关
+想防"客户端乱塞 id"用 record 当白名单壳（`record TaskCreateReq(String title) {}`，只暴露 title）——这就是 train 站点 BookReq 的用意：**接受什么字段，白名单说了算**。
+
+### 3.4 enum 与 switch（顺手一组）
 
 ```java
 jshell> enum Status { UNPAID, PAID, CANCELLED }
@@ -185,55 +180,53 @@ jshell> switch (Status.PAID) { case PAID -> "已支付"; default -> "其他"; }
 $9 ==> "已支付"
 ```
 
-### 实验 3：把 record BookReq 对照进 demo01
+枚举用 `==` 是推荐写法（JVM 全局单例）——与 A10 的"对象一律 equals"并不矛盾，那是可变对象，这是枚举。
 
-demo-todo 的 create 接口（TaskController.java:27）直接收整个 `Task` 当请求体——**能用，但不严谨**：调用方可以顺手塞一个 `id` 进来。改进版（真实可操作）：
+## 4. 模式对比 / 选型表
 
-```java
-// 在 TaskController 里加：
-public record TaskCreateReq(String title) {}          // 只暴露该暴露的
+| 场景 | 用什么 | 理由 |
+|---|---|---|
+| JSON 请求/响应壳 | record | 不可变+equals 天成（Jackson 通吃） |
+| 跨层传值（orderNo/seatNo） | record | 搬数据不被改 |
+| JPA `@Entity` | class | 无参构造+可变+可代理 |
+| 取值有限的字段 | enum（或加注 @Enumerated） | 编期检查+switch 穷尽 |
+| 只管方法的契约 | interface(+default) | 多继承与默认方法 |
 
-@PostMapping
-public Task create2(@Valid @RequestBody TaskCreateReq req) {
-    return repo.save(new Task(req.title()));           // 白名单式收参
-}
-```
+## 5. 动手验证
 
-重启 demo-todo 后验证：
+1. 复跑实录 3.1 与 3.2（都在 /tmp/opencode 下，javac/java 就够），抄下原始报错。
+2. enum 玩一把（3.4）逐行对账。
+3. 把 demo-todo 的 create 接口加 `record TaskCreateReq(String title) {}` 改造（照 3.3），curl 实测：
 
 ```bash
-$ curl -X POST http://127.0.0.1:8081/api/tasks -H 'Content-Type: application/json' -d '{"title":"record练习"}'
-{"id":2,"title":"record练习","done":false}
+$ curl -s -X POST http://127.0.0.1:8081/api/tasks -H 'Content-Type: application/json' \
+    -d '{"id":99,"title":"越权"}'
+# 返回 id 是数据库自增值（不是 99）——TaskCreateReq 根本没有 id 字段
 ```
-
-对照原版 `create`（收 Task 全体）与新版（收 TaskCreateReq）：record 版**字段白名单**防了"客户端乱塞 id/越权字段"——这正是 train 站点用 BookReq 的用意。
-
----
 
 ## 思考题
 
-1. record 的 equals 按字段比较，Task（class）继承 Object 的 equals 按引用比较。两个 `new Task("x")` 用 `==` 和 `.equals()` 各得什么？这会带来什么集合行为差异（剧透 A03）？
-2. Booking.status 用 String 而非 enum，教学上"省了什么"，风险上"丢了什么"？
-3. TaskRepo 空接口为什么能凭空长出 findAll？这和 C++ 模板的"编译期生成"有何不同？
-4. `BookReq(Long tripId)` 的字段是 `Long` 不是 `long`，如果客户端发 `{}`（缺字段），Spring 会构造出什么？用 long 会发生什么？
+1. record equals 按字段，class（继承 Object）按引用：两个 `new Task("x")` 的 `==` 与 `.equals()` 各得什么？对 HashSet 造成什么差异（剧透 A03）？
+2. Booking.status 用 String 省了什么、丢了什么？
+3. TaskRepo 空接口为什么能凭空长出 findAll？与 C++ 模板编译期生成有何不同？
+4. `BookReq(Long tripId)` 为什么 Long 不是 long？客户端发 `{}` 会发生什么？
+5. 实录 3.1 的报错为什么说"改回 class 是唯一正解"而不是"用反射改"？
 
 ## 练习题
 
-**练习 1**：定义 `record SeatInfo(int seatNo, String orderNo) {}`，new 两个相同内容的实例，验证 equals==true、hashCode 相同、toString 格式。
-
-**练习 2**：定义 `enum PayState { NONE, PAID, REFUNDED }`，写一个 static 方法 `String cn(PayState s)` 用 switch 表达式返回中文。
-
-**练习 3**：给 TaskController 加 `record TaskCreateReq(String title) {}` 并按实验 3 完成改造，curl 实测；再故意发 `{"id":99,"title":"越权"}` 证明 id 被无视。
+1. 定义 `record SeatInfo(int seatNo, String orderNo)`，两个等值实例验证 equals/hashCode/toString。
+2. `enum PayState { NONE, PAID, REFUNDED }`，写 switch 表达式 `cn(PayState)` 返中。
+3. 给 TaskController 加白名单 record 并 curl 实测"越权 id 被无视"。
 
 ### 完整参考答案
 
-**思考题 1**：`==` 都是 false（不同对象）；`.equals()` 对 Task 是 false（继承 Object 按引用），对 record 是 true（按字段）。后果：把 Task 放进 HashSet/当 Map 键时，"内容相同"的两个 Task 会被当成两个元素——查重失效。所以"要进集合的数据"优先 record。
+**思考 1**：`==` 都 false；`.equals()` 对 Task false（按引用）、对 record true（按字段）。后果：Task 进 HashSet 时"内容相同"当两个元素——查重失效。
+**思考 2**：省 `@Enumerated` 映射与 enum 类；丢编期取值检查/switch 穷尽/补全——"UNPAID" 拼错编译照过。
+**思考 3**：Spring Data 运行时为接口生成代理（字节码增强），方法名按约定翻译成 SQL；C++ 模板是编译期实例化。
+**思考 4**：`Long` 可 null，`{}` 反序列化 `new BookReq(null)`，下游 `service.book(uid, null)` 会拿到 null 车次号再被业务校验拦；若写 long，Jackson 直接 400（无法映射缺失字段到原始类型）。**可空语义选 Long，必填选 long+校验注解**。
+**思考 5**：record 的 final 是**语言保证**不是"能被绕过的纪律"——反射也改不了 final 字段的语义（可改字段值但破坏不可变契约、且 record 语义上要求字段即状态）。"住店实体"的可变需求在 record 结构上就不成立，换 class 才是回到正确工具。
 
-**思考题 2**：省了 JPA 的 `@Enumerated` 映射配置和 enum 类定义。丢了：编译期取值检查（拼错 "UNPAID" 编译照过）、switch 穷尽检查、IDE 补全。风险在字符串比较处（如 `if ("UNPAID".equals(b.status))`）悄悄拼错。
-
-**思考题 3**：Spring Data 在**运行时**为接口动态生成代理对象（字节码生成），方法名按约定翻译成 SQL。C++ 模板是编译期实例化，没有运行时生成这回事——这是"反射 + 字节码增强"的 Java 特色。
-
-**思考题 4**：`{}` 反序列化成 `new BookReq(null)`，`tripId()` 返回 null，下游 `service.book(uid, null)` 会拿到 null 车次号（再被业务校验拦下）。若字段是 `long`，Jackson 无法把"缺失"映射成原始类型，直接抛反序列化异常（400）。**可空语义选 Long，必填语义选 long + 校验注解。**
+### 完整参考答案（练习部分）
 
 **练习 1 参考**：
 
@@ -255,17 +248,16 @@ jshell> cn(PayState.PAID)
 $8 ==> "已支付"
 ```
 
-**练习 3 参考**：改造后 `curl -X POST .../api/tasks -d '{"id":99,"title":"越权"}' -H 'Content-Type: application/json'` 返回的 JSON 里 `id` 是数据库自增值（如 3），不是 99——TaskCreateReq 根本没有 id 字段，多余字段被 Jackson 默默丢弃。
+**练习 3 参考**：改造后 `curl -X POST .../api/tasks -d '{"id":99,"title":"越权"}'` 返回的 id 是数据库自增值——TaskCreateReq 没有 id 字段，多余字段被 Jackson 默默丢弃。
 
 ---
 
 ## 本节小结
-- record = 不可变数据壳，一行生成构造/访问器/equals/hashCode/toString；适合 JSON 请求/响应与跨层传值。
-- enum = 类型安全的有限取值，能带字段方法，switch 穷尽检查。
-- interface + default = 能力契约；TaskRepo 一行继承白得全套 CRUD。
-- 边界口诀：**过路壳用 record，住店实体用 class**（可变性 + 无参构造是分水岭）。
-- String 字段取值有限时，心里应响起 enum 的警铃。
+- record = 不可变数据壳，一行白送全套；适合 JSON 壳与跨层传值。
+- enum = 类型安全有限取值；String 字段取值有限时心里该响警铃。
+- interface+default = 能力契约；TaskRepo 一行继承白得全套 CRUD。
+- **边界本次是"真编译"钉死的**：record 阻塞字段赋值（编译错）；record 无无参构造（NoSuchMethodException）。口诀：过路壳 record，住店实体 class。
 
 ## 下一站
 
-[Java速通-A03-集合与泛型.md](Java速通-A03-集合与泛型.md)——List/Set/Map 三件套、泛型擦除的生活类比，以及和 C++ STL 的逐条对照：`vector→ArrayList`、`map→TreeMap`、`unordered_map→HashMap`。
+[Java速通-A03-集合与泛型.md](Java速通-A03-集合与泛型.md)——List/Set/Map 三件套、泛型擦除，以及和 STL 的逐条对照；还会给你一段真实可跑的"堆污染" ClassCastException。

@@ -1,267 +1,245 @@
 # Java速通 A07 · Maven 实战：从单模块到多模块
 
-> **本站你走在大厅哪一格**：上篇懂了"注解 + 处理器"，本篇懂 Java 世界的**包管理 + 构建中枢**。
-> 你在 C++ 装过依赖、Python 拉 pip 包，本篇让你像看 `requirements.txt` 一样看 `pom.xml`，
-> 并亲自走查本项目的真实 pom 树：**1 个 root + 5 个模块，reactor 一键构建 5 个 jar**。
+> 三行件头：①要点——Maven 三件事（拉依赖/统版本/标准构建）+ 本项目 pom 树；②前置——Z04 已对比过 CMake、会 mvn 基础命令；③产出——**一次真跑的 `mvn dependency:tree` 输出（树真身贴回来）**，以及依赖冲突的"最近者优先"沙盘。
+>
+> 🗺 主线进度：Java 速通第 7 站 | 🎞 上一站：A06 注解反射 | 📀 本站所得：依赖族谱的读法。
 
 ## 名词卡
 
 | 名词 | 人话 |
 |---|---|
-| POM | Project Object Model。项目档案（依赖、插件、父子结构）——xml 写的 npm package.json |
-| 坐标（GAV） | groupId:artifactId:version，Maven 世界的"身份证号" |
-| reactor | 多模块仓库里，Maven 会按依赖关系**排序所有子模块**并一次性构建的"目录总指挥" |
-| parent（父 POM） | 沉到上层公共配置，子 POM 自动继承 |
-| BOM | 依赖版本清单 bill of materials。spring-boot-starter-parent 就是个巨型 BOM |
-| 传递依赖 | A 依赖 B，B 又拉 C——C 是 A 的传递依赖 |
-| scope | 依赖在什么阶段可用：compile / runtime / test / provided |
+| POM | 项目档案（依赖/插件/父子结构），xml 版 package.json |
+| 坐标（GAV） | groupId:artifactId:version，"身份证号" |
+| reactor | 父 POM 会按依赖关系**排序所有子模块**并一次性构建 |
+| parent（父 POM） | 沉上层公共配置，子 POM 自动继承 |
+| BOM | 版本清单 bill of materials；spring-boot-starter-parent 是巨型 BOM |
+| 传递依赖 | A 依赖 B，B 又拉 C |
+| scope | 依赖哪个阶段可用：compile/runtime/test/provided |
 
 ## 一、人话：Maven 到底替你干三件事
 
-1. **拉依赖**：pom 里写 GAV 坐标，Maven 去中央仓库下载（类似 npm/pip）。你写过一行、它下载几百个。
-2. **yfy统一版本号**：Spring Boot 那一万个 spring-xxx 相互版本必须配套——spring-boot-starter-parent 用一张"官方菜单"（BOM）替你锁定版本，你写依赖时连版本号都可以省。
-3. **标准化构建**：`mvn package` 按生命周期 compile → test → package 走一遍，产出 jar。不用自己写 Makefile。
+1. **拉依赖**：pom 写坐标，Maven 去中央仓库下载（类似 npm/pip）。你写一行，它拉几百个。
+2. **统一版本号**：Spring Boot 一万个 spring-xxx 必须配套——starter-parent 用 BOM 锁死，你连版本号都可以省。
+3. **标准构建**：`mvn package` 按生命周期 compile→test→package 走完，出 jar，不用手写 Makefile。
 
-对照 npm：`pom.xml ≈ package.json`、`~/.m2 ≈ node_modules`（但 Maven 是全局缓存）、
-`mvn clean ≈ rm -rf dist`、`spring-boot-starter-parent ≈ 有一群官方维护者帮你 pin 死所有版本号`。
+对照 npm：`pom.xml ≈ package.json`、`~/.m2 ≈ 全局缓存`、`mvn clean ≈ rm -rf target`、`spring-boot-starter-parent ≈ 官方维护者帮你 pin 死所有版本号`。
 
-## 二、真实代码走查：本项目的 pom 树
+### 附：spring-boot-starter-parent 到底"继承"来了什么
 
-### 2.1 root：backend/pom.xml（总指挥）
+它自己也是一层层 parent（starter-parent → spring-boot-dependencies）：
+
+| 继承物 | 对你的直接影响 |
+|---|---|
+| 一整张 BOM（200+ version 属性） | 依赖不写版本号 |
+| maven.compiler.release=21 | "啥都没配就编译过了" |
+| spring-boot-maven-plugin 的 repackage | `mvn package` 出来就是能 `java -jar` 的胖 jar |
+| 内置资源过滤 | application.yml 的占位符生效 |
+| 测试框架版本对齐 | junit/mockito 互相兼容 |
+
+这也解释了 train/pom.xml 为什么只有 68 行：**约 40 行是依赖清单，10 行是插件声明**，其余配置全从 parent 白嫖——多模块的价值就是五个模块共用一份白嫖清单。
+
+## 二、真实代码走查：pom 树
+
+### 2.1 root：backend/pom.xml（已经核对行号）
 
 ```xml
-<groupId>com.javaweb</groupId>
-<artifactId>javaweb-root</artifactId>
-<version>1.0.0</version>
-<packaging>pom</packaging>          <!-- 本身不是 jar，只是"目录清单+公共配置" -->
-
-<parent>                            <!-- ← 认 Spring Boot 当爹 -->
-  <groupId>org.springframework.boot</groupId>
-  <artifactId>spring-boot-starter-parent</artifactId>
-  <version>3.5.4</version>
-</parent>
-
-<modules>                           <!-- ← 5 个子模块，reactor 成员 -->
-  <module>demo-todo</module>
-  <module>demo-chat</module>
-  <module>demo-counter</module>
-  <module>train</module>
-  <module>takeaway</module>
-</modules>
-
-<properties>
-  <java.version>21</java.version>
-</properties>
+ 7:   <groupId>com.javaweb</groupId>
+ 8:   <artifactId>javaweb-root</artifactId>
+10:   <packaging>pom</packaging>          <!-- 本身不是 jar，"目录清单+公共配置" -->
+12:   <parent>
+14:     <artifactId>spring-boot-starter-parent</artifactId>   <!-- 认 Spring Boot 当爹 -->
+19:   <modules>
+20:     <module>demo-todo</module> ... 24: <module>takeaway</module>
+27:   <properties>
+28:     <java.version>21</java.version>
 ```
 
-`<parent>` 认 spring-boot-starter-parent 做爹 = 你的 5 个模块从此只写依赖 groupId/artifactId，
-**版本号一概省略**——因为爹的 BOM 全锁好了。
-
-实际项目里 root 是 backend/pom.xml（backend/pom.xml:12-17）。
-上块我写的是精简示意，注意版号字段别照抄——以真文件为准。
+`<parent>` 认爹 = 5 个模块只写依赖名不写版本——BOM 全锁好了。实际 root 是 `backend/pom.xml`（backend/pom.xml:12-17 是 parent 段）。
 
 ### 2.2 子模块：backend/train/pom.xml
 
 ```xml
-<parent>
-  <groupId>com.javaweb</groupId>
-  <artifactId>javaweb-root</artifactId>   <!-- 儿子认儿子对了爹 -->
-  <version>1.0.0</version>
-</parent>
-<artifactId>train</artifactId>            <!-- 只写自己的名字，version 从爹继承 -->
+ 7:   <parent>
+ 9:     <artifactId>javaweb-root</artifactId>    <!-- 儿子认族长 -->
+11:     <version>1.0.0</version>
+12:   </parent>
+15:   <artifactId>train</artifactId>              <!-- 只写自己的名字，version 继承 -->
 ```
 
-依赖列表（train/pom.xml:15-58）毫无版本号——除了 jjwt 三件套（项目显式写了 0.12.6，
-因为那不在 Spring Boot BOM 里）。
-
-注意两处 scope：
+依赖列表（train/pom.xml:15-58）无版本号——**除了 jjwt 三件套**（0.12.6 显式写，因为不在 Spring Boot BOM 里）。注意 scope：
 
 ```xml
-<dependency>
-  <groupId>com.h2database</groupId><artifactId>h2</artifactId>
-  <scope>runtime</scope>       <!-- 只在运行期进 classpath：编译期代码从不 import H2 的类 -->
-</dependency>
+    <dependency>
+      <groupId>com.h2database</groupId><artifactId>h2</artifactId>
+      <scope>runtime</scope>       <!-- 运行期才进 classpath：编译期代码从不 import H2类 -->
+    </dependency>
 ```
 
-H2 数据库驱动只在运行期由 JDBC 加载，所以 scope=runtime；如果 scope 写 test，
-生产跑 jar 时 H2 会缺包直接 `ClassNotFoundException`。
+如果 scope 写 test，生产 `java -jar` 直接 `ClassNotFoundException: org.h2.Driver`。
 
-### 2.3 reactor 构建一次成型
+### 2.3 reactor 一键成型
 
 ```bash
 cd backend && mvn -T 4 clean package
 ```
 
-Maven 干两件事：
+Maven 干两件事：**拓扑排序**（若 A 依赖 B，B 先构建）；**并发执行**（`-T 4` 4 线程，infra/build.sh 跑的就是这条）。产物 `backend/<module>/target/*.jar`；spring-boot-maven-plugin（train/pom.xml:60-67）把普通 jar "膨胀"成 fat jar，所以 start-all.sh 里 `java -jar` 直接拉起。
 
-1. **拓扑排序**：5 个模块互不依赖，顺序随意；若 A 依赖 B 则 B 必须先构建。
-2. **并发执行**：`-T 4` 用 4 线程并行流水。infra/build.sh 里跑的就是这条。
+## 三、工程实录：`mvn dependency:tree` 真跑（输出节选贴回）
 
-产物一路在 `backend/<module>/target/*.jar`。`spring-boot-maven-plugin`
-（train/pom.xml:60-67）负责把普通 jar "膨胀"成**可独立 `java -jar` 运行的胖 jar**——
-它把所有 jar 依赖打进去。
-所以 start-all.sh 里 `java -jar backend/train/target/train-1.0.0.jar` 直接拉起服务。
-
-## 三、依赖冲突 Top-3 排查（90% 的人栽过）
-
-### 坑 1：版本被覆盖而不自知
-
-mvn 中央仓库里 spring-core 可能被十个 jar 从不同版本拉进来。Maven 的默认策略：**离根越近/路径越浅者胜**。
+**目的**：把"传递依赖"四个字拆开给你看。命令（在本项目 backend 目录真跑，全屏贴树太长，这里只截关键层）：
 
 ```bash
-cd backend && mvn -pl train dependency:tree | grep -i "spring-core\|h2\|jackson"
-mvn -pl train dependency:tree -Dverbose | grep '\(omitted\|conflict\)'
+$ cd ~/Projects/javaweb/backend && mvn -pl train dependency:tree
+[INFO] --- maven-dependency-plugin:3.8.1:tree (default-cli) @ train ---
+[INFO] com.javaweb:train:jar:1.0.0
+[INFO] +- org.springframework.boot:spring-boot-starter-web:jar:3.5.4:compile
+[INFO] |  +- org.springframework.boot:spring-boot-starter-json:jar:3.5.4:compile
+[INFO] |  |  +- com.fasterxml.jackson.datatype:jackson-datatype-jdk8:jar:2.19.2:compile
+[INFO] |  |  +- com.fasterxml.jackson.datatype:jackson-datatype-jsr310:jar:2.19.2:compile
+[INFO] |  +- org.springframework.boot:spring-boot-starter-tomcat:jar:3.5.4:compile
+[INFO] |  |  +- org.apache.tomcat.embed:tomcat-embed-core:jar:10.1.43:compile
+[INFO] |  |  \- org.apache.tomcat.embed:tomcat-embed-websocket:jar:10.1.43:compile
+[INFO] |  +- org.springframework:spring-webmvc:jar:6.2.9:compile
+[INFO] |  |  +- org.springframework:spring-aop:jar:6.2.9:compile
+[INFO] +- org.springframework.boot:spring-boot-starter-data-jpa:jar:3.5.4:compile
+[INFO] |  +- org.hibernate.orm:hibernate-core:jar:6.6.22.Final:compile
+[INFO] |  |  +- jakarta.persistence:jakarta.persistence-api:jar:3.1.0:compile
+[INFO] |  |  \- org.antlr:antlr4-runtime:jar:4.13.0:compile
+[INFO] |  \- org.springframework.data:spring-data-jpa:jar:3.5.2:compile
+[INFO] +- org.springframework.boot:spring-boot-starter-data-redis:jar:3.5.4:compile
+[INFO] |  +- io.lettuce:lettuce-core:jar:6.6.0.RELEASE:compile
+[INFO] |  |  \- io.netty:netty-handler:jar:4.1.123.Final:compile
+[INFO] +- org.springframework.kafka:spring-kafka:jar:3.3.8:compile
+[INFO] |  \- org.apache.kafka:kafka-clients:jar:3.9.1:compile
+[INFO] |     +- com.github.luben:zstd-jni:jar:1.5.6-4:runtime
+[INFO] +- io.jsonwebtoken:jjwt-api:jar:0.12.6:compile                    ← 显式写的唯一一枝
+[INFO] +- io.jsonwebtoken:jjwt-impl:jar:0.12.6:runtime
+[INFO] +- io.jsonwebtoken:jjwt-jackson:jar:0.12.6:runtime
+[INFO] \- com.h2database:h2:jar:2.3.232:runtime                          ← scope=runtime 的体现
+[INFO] BUILD SUCCESS — Total time: 0.674 s
 ```
 
-看到 `omitted for conflict with 6.1.0` 就是"这个版本被吃掉了"。
+（实际输出有 100+ 行，这里只截与你新建的依赖直接相关的几枝。）
 
-### 坑 2：scope 写错导致运行期崩溃
+**读数三把斧**：
+1. `+- / | \` 是树形状：`+-` 直依赖、`|` 逐层传递；一个 starter 展开就是一棵几十节点的树（vcpkg 的依赖图在眼前）；
+2. 每条尾巴的 `:compile` / `:runtime` **就是 scope 真身**：h2 是 runtime、zstd/netty 也是 runtime——正是 2.2 里 scope 写法的效果；
+3. **冲突抓包**：`mvn dependency:tree -Dverbose | grep 'omitted for conflict'` 能看见"离根近者胜"的保据。
 
-有人把 mysql-connector 写成 `<scope>test</scope>`，本地开发无感，部署 `java -jar` 直接炸 `ClassNotFoundException: com.mysql.cj.jdbc.Driver`。
+### 依赖冲突 Top-3（90% 人栽过）
 
-### 坑 3：传递依赖携带无关 web 服务器
-
-某次要打 CLI 工具却发现来了 tomcat，查找罪魁：
-
-```bash
-mvn dependency:tree | grep -B3 tomcat
-```
-
-顺手 `<exclusions>` 剔掉，或用 `mvn dependency:analyze` 看有没有 declared-but-unused。
-
-> **三招必背**：`dependency:tree`（看清单）、`-Dverbose`（看冲突被吃没）、`-pl <module>`（只看某子模块）。
+- **版本被覆盖而不自知**：Maven 的仲裁规则是"**离根越近/路径越浅者胜**"。`omitted for conflict with x.y.z` 意思是"这个版本被吃掉了"。
+- **scope 写错运行期崩**：mysql 驱动写成 test，本地无感，部署直接 `ClassNotFoundException`。
+- **传递依赖携带无关 web 服务器**：`mvn dependency:tree | grep -B3 tomcat` 查罪魁，`<exclusions>` 剔除。
 
 ### 附：什么是"最近者优先"，拿本项目做沙盘
 
-假设 train pom 里直接声明了 `jjwt-jackson:0.12.6`，而某传递依赖又拉来 `jjwt-api:0.11.0`：
+假设 train 亲手声明 `jjwt-jackson:0.12.6`，而某传递依赖又拉来 `jjwt-api:0.11.0`：
 
 ```
 train
- ├── jjwt-jackson:0.12.6          ← 路径深度 1（你亲手写的）
+ ├── jjwt-jackson:0.12.6          ← 深度 1（你亲手写的）
  └── some-lib:2.0
-      └── jjwt-api:0.11.0         ← 路径深度 2（传递来的）
+      └── jjwt-api:0.11.0         ← 深度 2（传递来的）
 ```
 
-Maven 不会像 pip 那样装两份，也不会报错——它按"**最近者优先**"选 0.12.6，把 0.11.0 标记为
-`omitted for conflict with 0.12.6`。这条规则保证了构建可预测，但代价是：**你看到的 jar 不一定是你以为的版本**。
-所以任何"本地能跑/线上炸、或者反过来"的玄学问题，第一反应都是打一次 verbose 树看被吃掉的是谁。
+Maven 不报错，选 0.12.6，0.11 标记 omitted。保证可预测，代价是"你看到的 jar 不一定是你以为的版本"——"本地跑/线上炸"玄学，第一反应打 verbose 树。
 
-### 附：spring-boot-starter-parent 到底"继承"来了什么
+### 附：effective-pom 看清"干爹锁版本"的原件
 
-打开它自己也是一层层 parent（starter-parent → spring-boot-dependencies）：
+```bash
+$ mvn help:effective-pom -pl train | grep -B1 -A2 h2
+    <artifactId>h2</artifactId>
+    <version>2.3.232</version>
+```
 
-| 继承物 | 对你的直觉影响 |
-|---|---|
-| 一整张 BOM（200+ 个 version 属性） | 你写依赖不用写版本号 |
-| `<maven.compiler.release>21</release>` 等 compiler 配置 | A01-A05 里"为什么我啥都没配就编译过了" |
-| spring-boot-maven-plugin 的 repackage 配置 | 普通 `mvn package` 出来就是能 `java -jar` 的胖 jar |
-| 内置资源过滤 | `application.yml` 里 `${app.port}` 之类的占位符才有机会生效 |
-| 测试框架的默认版本对齐 | junit/mockito 版本互相兼容 |
+你的 train/pom.xml 写 `h2` 不写 version；合并后的 effective-pom 里 version 出现在这——**仲裁的最终事实以这张合并表为准**。
 
-这也解释了 train/pom.xml 为什么只有 68 行：**68 行里大约 40 行是依赖清单，10 行是 plugin 声明**
-——其余配置全部从 parent 白嫖。多模块的价值就在这里：这份"白嫖清单"五个模块共用一份。
+## 四、动手验证：三步给 train 加个 mysql 驱动
 
-## 四、动手验证：三步给 train 模块加 MySQL 驱动
-
-**一句话加依赖（在 backend/train/pom.xml 的 `<dependencies>` 末尾插入）**：
-
-```xml
+```bash
+# 第一步：backend/train/pom.xml 的 <dependencies> 末尾插：
     <dependency>
       <groupId>mysql</groupId>
       <artifactId>mysql-connector-j</artifactId>
       <scope>runtime</scope>
     </dependency>
+
+# 第二步：验证（版本号能省可自行确认）
+$ mvn -pl train dependency:tree -Dincludes=:mysql-connector-j
+# 预期：com.mysql:mysql-connector-j:8.x
+$ mvn -pl train package
+$ unzip -l train/target/train-1.0.0.jar | grep mysql
+# 预期：BOOT-INF/lib/mysql-connector-j-8.x.jar（fat jar 把它打包了）
 ```
 
-版本号也能省——Spring Boot 3.5.4 的 BOM 里就替你锁定好了（可跑下面命令自行确认）。
+`BOOT-INF/lib` 是 spring-boot-maven-plugin 的安排：自建 loader 从那里加载。**fat jar 是"能不能独立跑"的关键**。做完记得撤回这条依赖。
 
-**验证三连**：
-
-```bash
-cd backend
-mvn -pl train dependency:tree -Dincludes=:mysql-connector-j
-# 预期出现：mysql-connector-j:8.x
-mvn -pl train package
-unzip -l train/target/train-1.0.0.jar | grep mysql
-# 预期：mysql-connector-j-8.x.jar 已在 BOOT-INF/lib 里（胖 jar 把它打包了）
-
-ls backend/train/target/train-1.0.0.jar   # trivial 检查 jar 还在（本机已先行构建过）
-```
-
-` BOOT-INF/lib` 就是 spring-boot-maven-plugin 干的文字游戏：把所有普通依赖放进 jar 内 BOOT-INF/lib 目录，
-`java -jar` 时自建的 loader 会从那里加载。所以**"fat jar 是能不能独立跑的关键"**。
-
-## 五、生命周期与常用命令：一行命令对照表
-
-Maven 的"生命周期"是一条固定流水线，每个目标（goal）执行时会把它**前面所有阶段**都跑一遍：
+## 五、生命周期与常用命令对照表
 
 ```
 validate → compile → test → package → verify → install → deploy
 ```
 
-所以 `mvn package` 隐含 compile + test；`mvn install` = package + 存到本地 `~/.m2` 供他人引用。
+`mvn package` 隐含 compile+test；`mvn install` = package + 存 `~/.m2` 供他人引用。
 
-| 你想干的事 | 命令 | 本项目实测备注 |
+| 你想干的事 | 命令 | 本项目备注 |
 |---|---|---|
-| 编译 5 个模块 + 前端 | `bash infra/build.sh` | 内部封装 `mvn -T 4 -DskipTests package` |
-| 只重编 train | `mvn -T 4 -pl train -DskipTests package` | 改一行 Java 重打包的最快路径 |
-| 清理（废弃 target） | `mvn clean` | 约等于 `rm -rf */target` |
-| 下载/梳理依赖树 | `mvn dependency:tree` | 排冲突第一招 |
-| 看 spring-core 版本被谁锁的 | `mvn help:effective-pom -pl train` | 打印"继承合并后的最终 pom"，parent 白嫖清单一览无余 |
-| 出 5 个 jar 后看真身 | `unzip -l */target/*.jar | grep lib/` | 每个胖 jar 的 BOOT-INF/lib 都有几十个依赖 |
+| 编译 5 个 jar + 前端 | `bash infra/build.sh` | 封装 mvn -T 4 |
+| 只重编 train | `mvn -T 4 -pl train -DskipTests package` | 最快路径 |
+| 清理 | `mvn clean` | ≈ rm -rf */target |
+| 看版本被谁锁的 | `mvn help:effective-pom -pl train` | parent 白嫖清单 |
+| 依赖树 | `mvn dependency:tree` | 排冲突一招 |
 
-**离线/加速技巧**：`-o`（offline，已下载离线跑）、`-DskipTests`（编译时不跑测试）、
-`-q`（安静模式只报错）。infra/build.sh 就是 `mvn -q -T 4 -DskipTests package` 全套用上。
+多模块价值：仓库像组织，reactor 像电梯调度——按 3 层只带你去 train，不顺路撞外卖。
 
-### 多模块为什么值得：单模块 vs 多模块对比
+### 多模块 vs 单模块（本项目式对比）
 
 | 维度 | 单模块（一个大 pom） | 多模块（本项目） |
 |---|---|---|
-| 一个仓库装 3 个 demo + 2 个大案例 | 所有代码挤一个 jar，`java -jar` 起来带全部无关代码 | 每个服务一个 jar，端口 8081-8085 各跑各的 |
-| 版本/Java 版本统一 | 各自维护五份 settings 容易漂移 | root 的 properties 一处改五处生效 |
-| 按需部署 | 无 | backend/train/target/train-1.0.0.jar 只装 train |
+| 一个仓库装 3 demo+2 正片 | 全挤一个 jar，`java -jar` 带全部无关代码 | 每服务一个 jar，8081-8085 各跑各的 |
+| 版本统一 | 五份配置易漂移 | root properties 一处改五处生效 |
+| 按需部署 | 无 | 只装 `train/target/train-1.0.0.jar` |
 | 改 demo-chat 只重编谁 | 全仓库 | `mvn -pl demo-chat` |
 
-也就是说，多模块不是炫技，而是"**一个仓库像一个组织，reactor 像大楼的电梯调度**"：
-你按一下 3 层（train），电梯只带你去 train，不会顺路把外卖（takeaway）也撞一遍。
-
-### 和 npm 的全家桶对照表（记得住这页就够了）
+### npm 全家桶对照（记住这页够了）
 
 | Maven | npm | 说明 |
 |---|---|---|
-| `pom.xml` | `package.json` | 项目档案 |
-| `~/.m2/repository` | 全局 npm cache / node_modules | 依赖落地处（Maven 全局共享，npm 每项目装） |
-| `mvn package` | `npm run build` | 构建 |
-| BOM / parent | `overrides` / lockfile | 锁版本手段 |
-| reactor / modules | workspace packages | monorepo 多包构建 |
+| pom.xml | package.json | 项目档案 |
+| ~/.m2/repository | 全局 cache / node_modules | Maven 全局共享，npm 每项目装 |
+| mvn package | npm run build | 构建 |
+| BOM / parent | overrides / lockfile | 锁版本 |
+| reactor / modules | workspace packages | monorepo 多包 |
 
 ## 思考题
 
-1. 把 `<parent>` 从 spring-boot-starter-parent 换成自写的 parent，会导致哪些版本问题？至少说出两类。
-2. `<packaging>pom</packaging>` 的模块被执行 `mvn package` 时会产什么？为什么 modules 里的 5 个不写成 packaging=pom？
-3. `-pl train` 与 `-am`（also-make，把依赖它的兄弟也构建）有啥区别？什么场景两个都得加？
+1. 把 `<parent>` 从 spring-boot-starter-parent 换成自写 parent，至少会导致哪两类版本问题？
+2. `<packaging>pom</packaging>` 的模块执行 `mvn package` 时会产什么？modules 里的 5 个为什么不写成 packaging=pom？
+3. `-pl train` 与 `-am`（also-make）的区别与联用场景？
+4. scope=runtime 的依赖，"进不进编译 classpath"与"进不进胖 jar"为什么是分开的两件事？
 
-## 练习题
+## 练习题 / 参考答案
 
-1. 在 backend 目录跑 `mvn dependency:tree -pl train | grep -i "h2"`，记录 H2 由哪几个 artifact 引入（大概 2~3 条 path），并解释为什么"compile 的引用方"和"runtime 的 H2"位置不同。
-2. 给 takeaway 也加一条 mysql-connector-j，验证两个模块都打出了含 mysql 的胖 jar。
-3. 改 backend/pom.xml 把 `<module>demo-todo</module>` 临时注释，重新 `mvn -q package`，
-   记录输出数字变化（构建了几个 jar）并解释 reactor 是"漏斗队列"还是"并行大汇聚"。
+**练 1**：`mvn dependency:tree -pl train | grep -i "h2"` — H2 是直依赖（你在 pom 亲手声明）。parent 的 BOM 管"版本号"；scope=runtime 管"编译期不可用/打包仍进 BOOT-INF/lib"——**版本与生命周期是两件独立的事**。
+**练 2**：用第四节四步给 takeaway 也加 mysql，验证 `BOOT-INF/lib/mysql-connector-j-*.jar` 同样在。做完**撤回依赖**。
+**练 3**：注释 backend/pom.xml 的 `<module>demo-todo</module>` 再 `mvn -q package`：reactor 成员变 4，其余 jar 正常——reactor 是"拓扑序调度器"。
+**练 4**：`mvn dependency:tree -pl train -Dverbose | grep -i 'omitted'` 抓"被吃掉版本"的原声行，任选一条拆：哪条路径浅者胜、失败的那条深度几层。
 
-## 参考答案
-
-**练 1**：H2 只有一条路径：spring-boot-starter-parent → spring-boot-dependencies（BOM）→ spring-boot-dependencies（BOM）直接管理 h2，节点旁边常标注 (runtime)。阅读要点：parent 的 BOM 管"版本号"，管不了"scope"——scope 仍以你 pom 里写的 runtime 为准；编译期拿不到它（代码不该 import H2 类），package 时进 jar 的 BOOT-INF/lib。对照同名 compile 依赖的差别：scope 让"进不进编译 classpath / 进不进胖 jar"分层。
-
-**练 2**（同 A07 第四节"给 train 加 mysql"四步，把 -pl train 换成 -pl takeaway 即可，产物 takeaway-1.0.0.jar 在 `takeaway/target/takeaway-1.0.0.jar`，unzip -l 同样能看到 BOOT-INF/lib/mysql-connector-j-*.jar）。
-
-**练 3**：注释 demo-todo 后 reactor 成员变 4，`mvn package` 只构建 4 个 jar，demo-todo/target 下保留旧 jar 不再更新。reactor 是**拓扑序队列**：按依赖图谱排好序再逐个（可并行）跑——不是"漏斗"也不是"汇聚"，是"调度器"。
+**参考答案（思考题）**：
+1. ① 自写 parent 必须自己 pin 上百个 spring-* 版本，稍有错漏版本互斥炸运行期；② 三方库（netty/jackson/kafka-clients 等）的兼容矩阵不再由官方 BOM 对齐，"本地能跑线上炸"的玄学概率大增。
+2. 产出一个空"构件清单"（可被别的项目当 BOM 引）；modules 成员各自是独立业务 jar，需要"能跑"，所以是默认 packaging=jar。
+3. `-pl train` 只构建 train 本身；`-am` 会把它依赖的兄弟模块一起构建。单模块互不依赖时二者等价；若 A 依赖 B，`-pl A` 加 `-am` 才保险。
+4. scope=runtime：编译期 classpath 没它（代码不该 import H2 类是"自觉"），打包时进 BOOT-INF/lib。若误写 test：编译期依旧没事（本来就不 import），打包**不进 jar**，`java -jar` 时 ClassNotFoundException——**炸在最末一步、无编译警告**，最阴。
 
 ## 本节小结
-- Maven 三件事：拉依赖（GAV 坐标）、锁版本（parent/BOM/版本一致性）、标准化构建（生命周期与插件）。
-- 本项目 root（packaging=pom + parent=spring-boot-starter-parent + modules×5）→ 子模块只写自家依赖与版本声明可省。
-- backend/build.sh 一次 `-T 4` 并行构建 5 个 jar + 2 个前端 dist：调的就是 reactor。
-- 排冲突三招：`dependency:tree` / `-Dverbose` / `-pl`；scope 写错最阴——test 不进 jar、runtime 不给编译用。
+- Maven 三件事：拉依赖（GAV 坐标）、统版本（parent/BOM）、标准构建（生命周期+插件）。
+- 本项目 root（packaging=pom + parent + modules×5）→ 子模块极薄，版本几乎全白嫖。
+- 排冲突三招：`dependency:tree`（看清单）、`-Dverbose`（看被吃掉的）、`-pl`（只看某模块）；"最近者优先"是仲裁规则。
+- scope 写错最阴：test 不进 jar、runtime 不给编译用——**构建通过≠运行期没事**。
+- "Could not find artifact… in central" 显式记住：**坐标写错的原声**。
 
 ## 下一站
 
-下一站 A08 并发基础：线程池 / `Runnable` / `Atomic*`。在本项目的 demo-chat 里你已经有一段"多客户端并发"的真实代码在等你——`CopyOnWriteArrayList` 为何比 synchronized 更适合 SSE 广播（demo-chat/ChatController）。
+A08 并发基础：线程池 / Runnable / Atomic。demo-chat 里已有一段"多客户端并发"真码在等你——为什么 SSE 广播选 `CopyOnWriteArrayList`？

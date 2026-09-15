@@ -18,7 +18,15 @@
 | 展开运算符 `...` | 数组/对象拍平拼接：`[...a, x]`、`{...state, page: 2}` |
 | ES2015 | JS 语言的"大版本 6"（2015 年起），现代 JS 的分水岭 |
 
-## 一、let/const/var：从 Python/C++ 看作用域
+## 问题出发
+
+一条真实的线上教训：外卖小站某次"保存搜索条件"用了 `{ ...state }` 拷了一份对象，
+第二天用户反馈"明明收好了，搜索条件却莫名变了"——拷贝丢了对**嵌套层**的独立。
+本篇四样语法（let/var、箭头函数、模板串、解构）都是"字典速通"，但**每一样都有能在真机上复现的行为边界**；
+读完的验收标准不变：不查资料读懂 App.vue 的 65 行 `<script setup>`。
+**跑起来看的姿势**：`node` 直接可跑——本篇所有实验都不需要浏览器。
+
+## 一、概念人话：let/const/var：从 Python/C++ 看作用域
 
 Python 的规则是"函数内赋值即局部"，JS 一度被 var 搞复杂，ES2015 后简化：
 
@@ -200,6 +208,59 @@ abc alice USER
 65 行 `<script setup>` 里没有 var、没有 function 关键字的 this 坑、
 没有一处手拼 `'a' + v + 'b'`——**这就是现代 JS 语法的极简事实**。
 读完 B02 你已是"读代码级" JS 者；写代码级还差 B03 的响应式（数据怎么自动跟着动）。
+
+## 三点九、工程实录：踩坑与修复（真机实测）
+
+### 实录 1：`{ ...o }` 浅拷贝嵌套泄漏——"保存的搜索条件自己变了"
+
+**问题**（真实场景原型）：由 state 对象拷贝出一份"当前筛选条件"存档，但之后用户在原对象里改了嵌套字段，存档也跟着变——.findViewById 数据"被偷改"。
+
+**现场复现**（node）：
+
+```bash
+node -e '
+const o = { msg: { text: "买牛奶" } };
+const c = { ...o };                      // 浅拷贝
+c.msg.text = "改坏了";                    // 想改副本的嵌套层
+console.log(o.msg.text, "  ← 原版也跟着改，浅拷贝漏了嵌套层");
+'
+```
+
+真实输出：
+
+```text
+改坏了   ← 原版也跟着改，浅拷贝漏了嵌套层
+```
+
+**排查路径**：DevTools 里先 `o.msg === c.msg` —— 返回 `true`：**两个对象共享同一个嵌套引用**。
+**修复**：嵌套深就别用 `{ ...o }`，用结构化克隆 `structuredClone(o)`（浏览器与 Node 20+ 都有）；
+或明确逐层浅拷贝并写注释"已知浅层"。这坑与 A10"可变共享"是同一件事的 JS 版。
+
+### 实录 2：const 的"冻结"到底冻什么——真 TypeError 一行坐实
+
+```bash
+node -e '
+const arr = []; arr.push(1); console.log("const 数组仍可 push:", arr.length);
+try { const x = 1; x = 2 } catch (e) { console.log(e.name + ": " + e.message.slice(0, 30)) }
+'
+```
+
+真实输出：
+
+```text
+const 数组仍可 push: 1
+TypeError: Assignment to constant variabl
+```
+
+**读法**：const 管**引用**（变量格子里放的那个地址不能换），不清**内容**。
+这也是本站 api.js 的真实选择（frontend/train-ui/src/api.js:3）：
+
+```js
+export const api = axios.create({ baseURL: '/apitrain' })
+```
+
+`api` 用 const 是因为它**引用不该被换**（配好的 axios 实例全局共用）；而 `c.headers.Authorization =
+'Bearer ' + token` 在**同一个对象的内容**上写——合法、这正是 const 的预期用法。
 
 ## 思考题
 

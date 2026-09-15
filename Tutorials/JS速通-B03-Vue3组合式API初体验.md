@@ -23,7 +23,14 @@
 B03 之前至少应认识这些（均在 B02）：`<script setup>` 里的 `const`、箭头函数、
 `async/await`、模板串、`.map(...)`/`.filter(...)` 链式调用。若有一项陌生，先回 B02 的四节补记。
 
-## 一、人话：Vue 帮你省掉的三类活
+## 问题出发
+
+上午刚有一条真实反馈："Console 里 `state.count = 1` 明明赋值了，页面数值没动。"
+—根因正是本篇要拆透的**响应式原理的边界**：赋值必须是"写进响应式对象的那次"，绕开 Proxy（解构、临时变量）就断。
+本篇目标：② 原理（Proxy 拦截）、③ 实战（`npm run dev` 跑 train-ui 对真码走查）；
+**跑起来看的姿势**：`cd frontend/train-ui && npm run dev` 后浏览器加 DevTools Console。
+
+## 一、概念人话：Vue 帮你省掉的三类活
 
 B01 里你手动干过的三件事，全部被 Vue 自动化：
 
@@ -183,6 +190,79 @@ sed -i 's/火车购票小站/火车购票小站（改过一行）/g' frontend/tr
 
 > **Vue Devtools 装了？** 选项 Devtools 的 Vue 面板可直接在 Components 里看 `trips` `token` 的实时值——
 > 比 console 调试快十倍（Chrome 商店搜 Vue.js devtools）。
+
+## 三点八、工程实录：踩坑与修复（真机实测）
+
+### 实录 1：30 行 Proxy 版响应式——写得出来，就读得懂
+
+本篇第二节的 30 行最小模型就是把 Vue 内核把戏"裸奔"出来。真机运行（node，2026-09-15 实录）：
+
+```bash
+node -e '
+let current = null; const deps = new Map();
+function track(k){ if (current) deps.set(k, current) }
+function trigger(k){ deps.get(k)?.() }
+function reactive(obj){ return new Proxy(obj, { get(t,k){ track(k); return t[k] }, set(t,k,v){ t[k]=v; trigger(k); return true } }) }
+function effect(fn){ current = fn; fn(); current = null }
+const state = reactive({ count: 0, label: "未点" });
+effect(() => console.log("渲染A：count =", state.count));
+effect(() => console.log("渲染B：label =", state.label));
+state.count = 1; state.label = "新标签";
+'
+```
+
+真实输出：
+
+```text
+渲染A：count = 0
+渲染B：label = 未点
+渲染A：count = 1
+渲染B：label = 新标签
+```
+
+**注意第二行的"渲染B：label = 未点"**：effect 执行时就在读 label（第一次运行先"注册订阅"！），
+所以改 label 时才恰好通知到它——这直接证实"依赖收集按字段精确通知"。
+
+### 实录 2：`const { count } = state` 的一行脱敏（解构丢响应性，写活案例）
+
+```bash
+node -e '
+let current = null; const deps = new Map();
+function track(k){ if (current) deps.set(k, current) }
+function trigger(k){ deps.get(k)?.() }
+function reactive(obj){ return new Proxy(obj, { get(t,k){ track(k); return t[k] }, set(t,k,v){ t[k]=v; trigger(k); return true } }) }
+function effect(fn){ current = fn; fn(); current = null }
+const state = reactive({ count: 0 });
+effect(() => console.log("渲染：count =", state.count));
+const { count } = state;        // ← 解构：后续读 count 不再经过 Proxy
+state.count = 99;
+console.log("state.count =", state.count, "，但解构出的 count =", count);
+'
+```
+
+真实输出：
+
+```text
+渲染：count = 0
+渲染：count = 99
+state.count = 99 ，但解构出的 count = 0 ——渲染没再跑
+```
+
+**读法**：解构后局部变量 `count` 是**第一次经 Proxy 取出的值快照**，且它只是个 number——
+虽然 `state.count = 99` 的 set 拦截确实喊了订阅者，那些**只有 effect 内读才被注册**；
+直接也好，取值也好，**解构后的裸值不再是代理**。所以 Pinia 配 `storeToRefs`（B05）这种专用宏
+——逼每个字段是一份"代理直达"的 ref，而不是"值快照"。本项目的实际表现：`storeToRefs(user)`
+解出的 `token` 改了后页面顶栏立刻响应（Pinia store 底层实同于此）。
+
+### 实录 3：你读真码时的"三问一行法"
+
+在 train-ui（需求在 B02 已读到 `App.vue:3-7` 的 ref 声明群）读代码时，遇到响应式问题先自查三行：
+
+```text
+① 这值依赖的"写"走的是 ref/reactive 的写路径吗？（不是则没触发）
+② 它是"跨组件"吗?（是则不适合 local ref → 顺服 Pinia 出场，见下一站 B05）
+③ 模板里用了 `.value` 吗？（模板不要，script 需要——B03 立即踩的错）
+```
 
 ## 思考题
 

@@ -228,6 +228,77 @@ Kafka 事件说"订单 X 已创建"，可 H2 里它还不存在——消费者�
 
 ---
 
+## 6.6 工程实录：真实问题与解决——把 stock key 删了再下单：第 2 步"DECR 前崩溃"实测 & 防御分支
+
+**问题从哪来**：第 2 步的失败模式里最阴的是"DECR 根本没跑成"——即**key 都没来及动**就崩了。用 `redis-cli del` 把 `train:trip:{id}:stock` 拿掉，模拟"计数层整个不见了"（真实版型：重启未灌种子、运维 key 误删、Redis 实例半路换血）。然后抢一单，看系统怎么接。
+
+### 复现实录（2026-09-15 全栈在线，trip 5 的 key 删干净）
+
+```
+$ redis-cli del train:trip:5:stock
+(integer) 1
+$ redis-cli mget train:trip:5:stock train:trip:5:seq train:trip:5:lock
+1) (nil)          ← stock 已消失
+2) "0"            ← seq 还在
+3) (nil)          ← 没锁
+
+$ curl -s -X POST http://127.0.0.1:9090/apitrain/bookings \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $TOK" -d '{"tripId":5}'
+{"timestamp":"2026-09-15T08:49:10.819+00:00","status":500,"error":"Internal Server Error","path":"/api/bookings"}
+```
+
+### 检查"善后物证"（这次请求给系统留了什么残局？）
+
+```
+$ redis-cli exists train:trip:5:lock
+(integer) 0        ← 锁被 finally 还了——七步的"出闸"承诺没有破
+$ redis-cli get train:trip:5:seq
+"0"                ← 发号器没白跳：DECR 前的抛出把人留在了门外
+```
+
+**这不是运气，是代码里的守卫**：`book()` 第 49~51 行在 DECR 后有个专门接 null 的分支
+
+```java
+49:             Long stock = redis.opsForValue().decrement(stockKey);
+50:             if (stock == null) {
+51:                 throw new IllegalStateException("车次未初始化（stock key 缺失）");
+52:             }
+```
+
+Spring Data Redis 对**不存在的 key** 做 DECR 返回 `null`（不是 0 也不是 -1）——`if (stock == null)` 正是专为"key 消失"准备的防御分支；没有它，请求会带着 NPE 下坠，把日志里最直白的病因染成最玄学的一坨。**宁可抛语义清楚的自定义异常，也不要用 NPE 蒙混**——这是七步里最小的一个"失败也要留字条"行动。
+
+### 修复小 diff（教学作业：从"守住"升级到"自愈"）
+
+守卫现状是"拒绝并报错"，有教学价值也够安全；生产味更浓的写法是**按额定座位重建计数**、本次继续拒绝（把重建与续买拆开，防并发重复初始化）：
+
+```diff
+     Long stock = redis.opsForValue().decrement(stockKey);
+     if (stock == null) {
+-        throw new IllegalStateException("车次未初始化（stock key 缺失）");
++        int seats = trips.findById(tripId)
++                .orElseThrow(() -> new IllegalArgumentException("车次不存在"))
++                .totalSeats;
++        redis.opsForValue().set(stockKey, String.valueOf(seats));   // 以 totalSeats 为唯一可信锚点重初始化
++        throw new IllegalStateException("车次计数已重建，请重试一次");  // 本次仍拒绝：避免并发重复初始化
+     }
+```
+
+**为何以 `totalSeats` 为锚**：key 消失意味着你**永远不知道它消失前是多少**——唯一可信值是"额定座位"（历史订单都在 DB 里活着，DECR 侧只许按"没卖"口径重来）。如果对账例程（T06）也在线上， 对账例程还能给出第二个锚：`stock = totalSeats − count(UNPAID+PAID)` 的派生修正。
+
+### 复原验证（补回 key 再抢）
+
+```
+$ redis-cli set train:trip:5:stock 4
+OK
+$ curl -s -X POST http://127.0.0.1:9090/apitrain/bookings ... -d '{"tripId":5}'
+{"id":85,"orderNo":"3db05061-abe8-4b50-8de0-7861dc92b946","userId":77,"tripId":5,
+ "seatNo":1,"status":"UNPAID","createdAt":"2026-09-15T08:49:11.343470847Z","paidAt":null}
+```
+
+走完七步的请求与删 key 之前的行为一致——**防御分支的另一端（恢复态）同样被实测过了**。
+
+---
+
 ## 7. 常见坑清单
 
 | 症状 | 根因 | 修法 |
@@ -266,17 +337,6 @@ Kafka 事件说"订单 X 已创建"，可 H2 里它还不存在——消费者�
 - 每步的失败模式各有残局：锁竞争零残局、售罄靠 INCR 自愈、档案/落库失败会悬空库存（教学保留的补偿标本）、Kafka 失败丢事件（outbox 是正解）。
 - `finally` 是代码活着的承诺，TTL 是代码死了的保险——两层保险缺一不可。
 - 验证七步的四个物证：stock、seq、lock、audit 日志——一条 curl 后全部可查。
-
----
-
-| 症状 | 根因 | 修法 |
-|---|---|---|
-| 并发下单库存打成负数 | 拒绝路径没 INCR 还票 | 第 54 行 |
-| 全站所有车次都"手速太快" | 锁 key 忘带 tripId（全站一把锁） | 粒度到车次（第 38 行） |
-| 偶发"锁卡死 10 秒" | 崩进程没走 finally | TTL 兜底（设计如此，非 bug） |
-| 异常后库存永久少 1 | 补偿缺失（4.4 表） | 扣票后的步骤包 try/catch，catch 里 INCR |
-| 订单落了库但审计没记录 | Kafka 发送失败被吞 | outbox/重试；教学版查 kafka.log |
-| 删锁把别人的删了 | 锁值固定"1" | 随机值 + Lua 校验再删（5.3） |
 
 ---
 

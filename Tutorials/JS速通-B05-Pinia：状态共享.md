@@ -28,7 +28,16 @@
 
 本站 train-ui 目前只 1 个组件，散 ref 也能活——**是"还没到，不是永远不"**。
 
-## 一、人话：为什么不是"props 串到地老天荒"
+## 问题出发
+
+今早真实的联合调试：外卖前端把登录彻底做好后，测试同学输入**错误密码**，
+页面上弹出的是一句英文 "Request failed with status code 500"——用户一脸懵。
+这现象跨了**三层**：浏览器怎么发（本篇不管）、服务端怎么答（默认 JSON、语义不对——S07 收编）、
+以及**前端怎么把响应变成一条人话 msg**（本篇要讲的 axios 拦截器与 store 分工）。
+本篇先把"状态共享"讲清，实录里再拉**完整一次登录失败**的三层解梗。
+**跑起来看的姿势**：`curl -s -X POST :8085/api/auth/login -d '{"username":"alice","password":"wrong"}' -H 'Content-Type: application/json'`。
+
+## 一、概念人话：为什么不是"props 串到地老天荒"
 
 B04 的 TripCard 收一个 `:trip` prop，一层 props 传很优雅。但想象这些场景：
 
@@ -164,6 +173,67 @@ async function onLogin() {
 **Browser 现场验证**：`devtools → Application → Local Storage → localhost:5180`，
 登录后能看到 `train_token / train_user` 两个键——刷新页面（F5）**列表立刻重建**，无需再登录。
 然后 `localStorage.removeItem('train_token')` 再刷新——登录态消失："冰箱清空，隔夜失效"。
+
+## 三点六、工程实录：踩坑与修复（真机实测）
+
+### 实录 1：一次登录失败，三层各自"说了一句什么话"（三层截图逐层生成）
+
+**问题**：错密码登录，页面显示 "Request failed with status code 500"，用户没法从这句话获得行动。
+**现场复现**（服务端，2026-09-15 实录）：
+
+```bash
+curl -s -w '\nHTTP=%{http_code}\n' -X POST http://127.0.0.1:8085/api/auth/login \
+     -H 'Content-Type: application/json' -d '{"username":"alice","password":"wrong"}'
+```
+
+真实输出：
+
+```json
+{"timestamp":"2026-09-15T01:55:36.260+00:00","status":500,"error":"Internal Server Error","path":"/api/auth/login"}
+HTTP=500
+```
+
+第一个问题当场暴露：**端口发送的错误 JSON 里根本没 message 字段**（框架格式，不是业务错）→ S07 的收编对象。
+那前端怎么落成那句英文？看真码（frontend/takeout-ui/src/api.js:14-17）：
+
+```js
+api.interceptors.response.use(
+  r => r.data,
+  err => Promise.reject(err.response?.data?.message || err.message)
+)
+```
+
+`err.response.data.message` 是 undefined（**框架 JSON 无 message**）→ 退到 `err.message`
+＝ axios 自己描述的 "Request failed with status code 500"。所以页面上 `msg.value = String(e)`
+（takeout-ui App.vue:47 的 catch）就真的把这行英文 toast 出去了。
+
+**修复路径**（真改两处）：
+- 服务端：S07 的 GlobalExceptionHandler 把"用户名或密码不匹配"翻译成 `{"code":"AUTH_FAIL","msg":"用户名或密码错误"}`；
+- 前端：拦截器里的 `err.response?.data?.message` **终于等到真 message**，零改动即显示人话——
+  这正是"前端 promise 链写好后，后端一改，前端立刻变好"的公共合同威力。
+
+### 实录 2：前端"登出"是"自己擦桌"——服务端 token 仍然有效（真机证实）
+
+**问题**：测试同学迷茫：前端"退出登录"只是把 localStorage 擦了，那这枚 JWT 到底还认不认？
+**现场复现**：先用合法 token 取我的订单一次（200），再**在前端 Application 面板删掉** `takeout_token`
+等价于"不带了"——分别打两枪：
+
+```bash
+# ① 带着旧 JWT（前端已"登出"）——服务器仍然认账：
+TOK=eyJhbGciOiJIu...      # 登录所得
+curl -s -o /dev/null -w '%{http_code}\n' -m 5 \
+     http://127.0.0.1:8084/api/bookings/mine -H "Authorization: Bearer $TOK"
+# 200               ← JWT 无状态，前端删除不影响服务端效力
+
+# ② 完全不带 token：
+curl -s -o /dev/null -w '%{http_code}\n' -m 5 http://127.0.0.1:8085/api/orders/mine
+# 401               ← AuthInterceptor 拿不到 Bearer，直接 401
+```
+
+真实行为（本机实录）：**① 200，② 401**。
+**读法**：logout 中的 `localStorage.removeItem(...)` 只清前端"隔夜柜"——服务端 token除在 120 分钟 TTL 内仍然"合法"。
+**这是"前端状态≠权限"的最硬证据**（本文表 4 的 Turnto：Pinia/localStorage 的可信度=0 班）。
+真实工程里的补救：登出要**服务端参与**（Redis 黑名单 JWT 或超短 TTL），这正是 W04/S13 的课题。
 
 ## 四、Pinia vs 后端"session/Redis"的对照（别混淆）
 

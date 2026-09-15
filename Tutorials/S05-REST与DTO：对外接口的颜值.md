@@ -4,6 +4,14 @@
 >
 > 学完本课你能：说出本项目真实用到的 9 个状态码的区别；亲手把"删除成功→204"的语义玩转；看懂 record 的一行 DTO 与"输入输出分离"的真实取舍。
 
+## 问题出发
+
+今早的真实一幕：票被前面的实验**卖光了**（`redis-cli get train:trip:1:stock` → `0`），
+用户在页面上点"购票"——收回来的是一句 `{"error":"Internal Server Error"}`。
+**业务上"已售罄"是 100% 正常的拒绝，却在代码里被当成 500 "服务端着火"**；
+日志里倒是躺着 50 行完整堆栈（`BookingService.book:55`）。本篇讲"答得体面"，
+实录节把这次"已售罄 500"从客户端、日志、服务端三个视角各截图一次（真机）。
+
 ## 本站名词卡
 
 | 名词 | 一句话人话 |
@@ -219,6 +227,71 @@ curl -s -X POST http://127.0.0.1:8084/api/bookings -H "Authorization: Bearer $TO
 ```
 
 **注意：这是框架性的错误格式**，不含你的业务话术（为什么下单失败？"车次不存在"其实话还没到靠这出口传出来）。谁把它收编成稳定的错误合同（如 `{"code","msg","status","path","ts"}`）？**下一课 S07 拿方案**。
+
+## 四点二、工程实录：踩坑与修复（真机实测）
+
+### 实录：一次"已售罄"在三个视角各留下的一张截图
+
+**背景**：实验把 trip 1 的余票卖到 0（`redis-cli get train:trip:1:stock` → `0`）后用户又点了一次购票。
+
+**视角 ① 客户端（curl = 前端）**——2026-09-15 真机：
+
+```bash
+TOK=$(curl -s -X POST http://127.0.0.1:8084/api/auth/login \
+      -H 'Content-Type: application/json' \
+      -d '{"username":"stu1789437336","password":"pass123"}' \
+      | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
+curl -s -w '\nHTTP=%{http_code}\n' -m 5 -X POST http://127.0.0.1:8084/api/bookings \
+     -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' -d '{"tripId":1}'
+```
+
+真实输出：
+
+```json
+{"timestamp":"2026-09-15T04:31:01.502+00:00","status":500,"error":"Internal Server Error","path":"/api/bookings"}
+HTTP=500
+```
+
+**为什么是 401→重登再 500**：我第一次拿的是 11:55 注册那枚 token，隔 2 小时过期（`ttl-minutes: 120`）
+→ 拦截器 401；重新登录取新 token 后二次打——业务异常扑向兜底 500。
+（这条"token 2 小时过期"顺手表演了 S13 的 TTL 语义，收录在此当现场注脚。）
+
+**视角 ② 服务端日志（logs/train.log:298-306，真机原文）**：
+
+```text
+2026-09-15T12:31:01.494+08:00 ERROR 136886 --- [train] [nio-8084-exec-4] o.a.c.c.C.[.[.[/].[dispatcherServlet]
+    : Servlet.service() for servlet [dispatcherServlet] ... threw exception
+    [Request processing failed: java.lang.IllegalStateException: 已售罄] with root cause
+
+java.lang.IllegalStateException: 已售罄
+	at com.javaweb.train.service.BookingService.book(BookingService.java:55) ~[!/:1.0.0]
+	at com.javaweb.train.controller.BookingController.book(BookingController.java:34) ~[!/:1.0.0]
+	at org.springframework.web.method.support.InvocableHandlerMethod.doInvoke(...)
+	...
+```
+
+**排查路径**：**先看日志的一行摘要（异常类名+message），再点开 top-3 行栈帧**——
+`BookingService.book:55` 直接给到"哪个类的哪一行拒绝"；不需要 debugger 断点。
+
+**视角 ③ 业务根源 Redis**：
+
+```bash
+redis-cli get train:trip:1:stock
+# "0"                          ← 库存为 0：这是"正常业务的回绝"，不是故障
+```
+
+**修复与对账**：
+
+```bash
+redis-cli set train:trip:1:stock 3     # 补满货架（smoke.py:62-68 同款做法）
+python3 infra/smoke.py | tail -1       # → smoke: 24 通过 / 0 失败
+```
+
+**读法**（本篇的"颜值"评分）：
+- **语义**：`IllegalStateException("已售罄")` 是业务正常拒绝，**应然 409**（S05 表里预留的那行"409（S07 后启用）"就是为它写的）；
+- **话术**：客户端只有 `Internal Server Error`——服务端有话可说但说不出（默认 JSON 无 message 通道）；
+- **观测**：日志有 50 行堆栈可追（运维倒推很快），但**客户端血本无归**。
+三个问题一字排开，收编方案在 S07：`IllegalStateException → 409 + code=STATE_CONFLICT + msg=已售罄`。
 
 ## 思考题
 <!-- 追加拆解：一句话看穿 record 的"额外福利" -->

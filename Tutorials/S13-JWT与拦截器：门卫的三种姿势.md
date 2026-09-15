@@ -145,7 +145,52 @@ signature: ...
 
 ---
 
-## 4. 拦截器注册与白名单：门卫手册
+## 4. 工程实录：真实问题与解决——把 ttl 做强改，看 token 的 401 到点
+
+**问题**：S08 思考题埋了一颗雷：`exp` 是签发瞬间烙死在 payload 里的。本站把它做实：用 `--app.jwt.ttl-minutes=1` 起一架"短命 token"专机，观测 token 的 ttl 及到点后的 401。
+
+### 现场复现（换库启动专机，不惊动 8084 生产件）
+
+```bash
+nohup java -jar backend/train/target/train-1.0.0.jar --server.port=7084 \
+    --spring.datasource.url='jdbc:h2:mem:ttlf;DB_CLOSE_DELAY=-1' \
+    --app.jwt.ttl-minutes=1 > /tmp/opencode/ttl1.log 2>&1 &
+sleep 25
+curl -s -X POST 127.0.0.1:7084/api/auth/register -H 'Content-Type: application/json' -d '{"username":"ttluser1","password":"pass123"}' > /dev/null
+TOK=$(curl -s -X POST 127.0.0.1:7084/api/auth/login -H 'Content-Type: application/json' -d '{"username":"ttluser1","password":"pass123"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+```
+
+**实测 payload（base64url 解码）：**
+
+```
+payload : {"sub":"ttluser1","uid":1,"iat":1789438878,"exp":1789438938}
+exp - iat = 60 秒      ← 配置 ttl-minutes=1 一分为一秒不差打进 token（S08 配置→token 实体对账延续）
+```
+
+**实测请求矩阵（真实 token 观测）：**
+
+```
+$ curl -s -o /dev/null -w '%{http_code}\n' "127.0.0.1:7084/api/bookings/audits?n=1" -H "Authorization: Bearer $TOK"
+200      ← 拿票立刻验证：新鲜票开门
+
+（sleep 75，t+60s 的 exp 已过）
+
+$ curl -s -o /dev/null -w '%{http_code}\n' ... 同一请求、同一张票
+401      ← verify 里 parseSignedClaims 抛 ExpiredJwtException → null → 拦截器 :19 的 401
+```
+
+### 三个认知坐实
+
+1. **过期判定是服务端逐请求做的**：不是"服务器保存会话到点注销"——token 里 `exp` 只是 Recording，谁也不记得它；70 秒后票在你手上但**门卫不认了**。
+2. **配置改 TTL ≠ 已发 token 短命**：`ttl-minutes=1` 只影响**此后签发**；token 里已烙的死 `exp` 不可变。所以运营想把"一个 120 分钟超长 token"作废，靠改配置没门——得改 secret（全体失 EFFECT）或上黑名单/刷新机制。
+3. **401 的形状**（对照 S13 第 5 节三形状）：这只 401 是**"票是假的/过期了"**（verify null 路径，:19），不是"没票"（:14）——外面看不出差别，这就是教学版合并两类的代价，生产可回传更细的错误码。
+
+**刻度**：JWT 的"无状态"是把刀的也——**服务端不存，就改不了签出的历史**。TTL 是"下一次签发"的参数，不是"这票还活多久"的旋钮。
+
+---
+
+## 5. 拦截器注册与白名单：门卫手册
+
 
 ### 4.1 先看注册（`backend/train/src/main/java/com/javaweb/train/config/WebConfig.java`）
 
@@ -216,7 +261,7 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer abc.def.ghi
 
 ---
 
-## 5. 三种 401 的"骨架差异"——门卫三种姿势
+## 6. 三种 401 的"骨架差异"——门卫三种姿势
 
 | 情况 | 实测形态 | 白名单？ | 语义 |
 |---|---|---|---|
@@ -228,7 +273,7 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer abc.def.ghi
 
 ---
 
-## 6. 思考题（先想 3 分钟）
+## 7. 思考题（先想 3 分钟）
 
 1. payload 里的 `uid` 谁能核实？如果签名不同，客户端把 `uid=1` 改成 `uid=999` 会怎样（代码+实测：401）。**为什么这样是设计安全的？**
 2. `iat/exp` 是**签发瞬间**烙死的：若服务端重启时改了 `app.jwt.ttl-minutes`，已签的票行为如何？——连接 S08 思考题 2 的答案（不改）。
@@ -236,13 +281,13 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer abc.def.ghi
 4. 拦截器 vs Spring Security FilterChain：本项目选拦截器的取舍是什么？（提示：教学透明度 vs 生产通用件。）
 5. 客户端没法拿走 `secret`——那 0.12 的 `signWith(key)` 为什么应由服务端**唯一**持有？请一口气说出两个理由。
 
-## 7. 练习题
+## 8. 练习题
 
 1. 把 WebConfig 的白名单中 `"/api/health"` 改为 `"/api/bookings/health"`，实测 `curl /api/bookings/health` 无票返回什么（对照改之前 401 的差距）。
 2. 用 python 手写一个"签一枚 JWT"交付：不依赖 jjwt 而用 `hmac` + `base64url` 实现 HS384 三段拼装（和缺登对：与 train 的 token 字节级比较）。
 3. 从 logs/train.log 里抓一条"401 前的"日志格式的真实行，贴回你的笔记，标出 PID 与线程列。
 
-## 8. 参考答案
+## 9. 参考答案
 
 **练习 1**（实测，白名单生效的一行如刀）：
 
@@ -283,7 +328,7 @@ PID `81746`、线程 `io-8084-exec-10`（Tomcat request performer）——**下�
 
 ---
 
-## 9. 本节小结
+## 10. 本节小结
 
 - JWT = header + payload + signature 三段绿；**payload 明文可读**（不是加密），防伪全靠 signature。
 - 0.12 API 三关键词：`verifyWith` / `parseSignedClaims` / `signWith(key)`（算法由密钥自带）。
@@ -293,6 +338,6 @@ PID `81746`、线程 `io-8084-exec-10`（Tomcat request performer）——**下�
 
 ---
 
-## 10. 下一站
+## 11. 下一站
 
 生意搭好了，怎么知道它**真的能跑**？S14：测试——单元测试 vs 集成测试 vs smoke（infra/smoke.py 23 断言实录），并亲手用 MockMvc 写一个最小测试 → 跑 `mvn test`，**用真实输出对照**（今天的 3/3 绿实录等着你）。

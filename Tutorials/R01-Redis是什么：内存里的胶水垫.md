@@ -193,6 +193,54 @@ $ redis-cli GET tutorial:no-such-key
 
 ---
 
+## 4.5 工程实录：踩坑与修复——"第二个实例"与"连不上的门"
+
+**故事**：教学群里同学想"自己起一个不污染项目的 Redis 练练手"，随手 `redis-server` 敲下去——把默认 6379 的项目实例顶掉了？还是起了个新的？端口占不占？这一段全部真机跑给你看。
+
+### 现场复现：连一个没人听的端口
+
+```
+$ redis-cli -p 6380 PING
+Could not connect to Valkey at 127.0.0.1:6380: Connection refused
+$ echo $?
+1
+```
+
+**定位**：报错文案三要素——"客户端是 valkey"、"目标 127.0.0.1:6380"、"Connection refused"（对方端口上**没有任何进程在听**，不是密码错、不是超时）。exit 码 1，脚本可以拿它当就绪判定。
+
+### 复现：起第二个实例（与项目实例并存）
+
+```
+$ redis-server --port 6380 --save '' --appendonly no --daemonize yes
+135703:M 15 Sep 2026 09:59:47.955 # WARNING Memory overcommit must be enabled! ...
+$ redis-cli -p 6380 PING
+PONG
+$ redis-cli -p 6380 INFO server | grep valkey_version
+valkey_version:9.1.2
+```
+
+**三个读点**：
+
+1. **6379 与 6380 互不干扰**：起第二个实例只是"多一间房"，项目实例（6379）原样在线（`redis-cli -p 6379 PING` 仍 `PONG`）——**实例隔离的单位是端口**，这正是 start-all.sh 用 `$REDIS_PORT` 变量而非硬编码的原因。
+2. **那行 WARNING 不是故障**：jemalloc 提醒"内存 overcommit 未开"，影响的是后台 save/fork，对 `--save ''` 的教学纯内存实例毫无影响——**日志要分级读，不是红的都在着火**。
+3. **`--daemonize yes`**：fork 成后台进程、shell 立刻返回——与 start-all 里的 `--daemonize no` + `nohup &` 是**同一种效果的两种写法**（一个托管给 nohup、一个自托管）。
+
+### 修复（其实是"收尾"）与再验证
+
+实验完顺手回收现场，再验证拒绝：
+
+```
+$ redis-cli -p 6380 SHUTDOWN
+$ redis-cli -p 6380 PING
+Could not connect to Valkey at 127.0.0.1:6380: Connection refused
+```
+
+**提炼一条排障守则**：遇到"连不上 Redis"，三步走——`(echo > /dev/tcp/127.0.0.1/6379)` 探端口（shell 自带，零依赖）→ `ps aux | grep redis-server` 看进程在不在 → `redis-cli INFO server` 验协议通。**端口 → 进程 → 协议**，与 K02 附录 B 的 Kafka 三步法同宗。
+
+### 代码走查补刀：为什么 start-all 能"安全跳过已在线"
+
+回头看第 3 节那段 `redis-cli -p $REDIS_PORT PING 2>/dev/null || ( … )`：`PING` 通则短路跳过、不通才起新进程——**幂等启动**的基础就是把"连接探测"写成一条命令。你刚实测的 `exit=1` 正是这条 `||` 分支的触发器： refusing 拒绝 → PING 失败 → 括号里的拉起逻辑登场。**每一段运维脚本背后，都有一个你今天亲手按过的失败样本。**
+
 ## 5. 思考题（先想 3 分钟）
 
 1. 为什么"单线程"既是 Redis 速度的**功臣**（原子、免锁）又自带**风险**（慢命令卡全队）？举一条你打算在本项目 jogging 里劝退大家的命令。

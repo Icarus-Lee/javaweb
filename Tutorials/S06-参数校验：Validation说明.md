@@ -4,6 +4,14 @@
 >
 > 学完本课你能：分清 JSR 380（规范）/ Hibernate Validator（实现）/ Spring Boot（集成）三层各干什么；有一条稳定的 400 断言在手，并知道 train 侧那条"手写校验"为什么现在还是 500（留给 S07 的欠账）。
 
+## 问题出发
+
+今早外卖侧两条真实的数据从大门走进来了：
+① 用户**根本没传 quantity 字段**——系统**静默地按 1 份**下单成功（200）；
+② 用户传了 `quantity: 0`——报的是 500（服务端手写 `IllegalArgumentException("至少点 1 份")` 被兜底）。
+**一个"少传即默认"、一个"传错进火葬场还烧错科目"**：没法断言、没法提示；
+这就是"校验在入口"缺位的两副面孔。本篇先给"注解怎么通电"，实录节先把两案钉死（真机）。
+
 ## 本站名词卡
 
 | 名词 | 一句话人话 |
@@ -204,6 +212,68 @@ curl -s -o /dev/null -w 'HTTP=%{http_code}\n' -m 5 -X POST http://127.0.0.1:8084
 ```
 
 **但**错误 JSON 仍是 Spring 默认格式（不含 `@NotBlank` 的 message 细节），谁把它改成 `{"code":"VALIDATION_FAIL","msg":"username: 不能为空"}`？——**下一课 S07 的作业**。
+
+## 三点九、工程实录：踩坑与修复（真机实测）
+
+### 实录 1：缺 quantity 字段——"少传即默认 1 份"的静默合同
+
+**现场复现**（2026-09-15 真机；alice 为 seed 帐户）：
+
+```bash
+AL=$(curl -s -X POST http://127.0.0.1:8085/api/auth/login -H 'Content-Type: application/json' \
+     -d '{"username":"alice","password":"123456"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
+curl -s -X POST http://127.0.0.1:8085/api/orders -H "Authorization: Bearer $AL" \
+     -H 'Content-Type: application/json' -d '{"shopId":1,"dishId":2}'
+```
+
+真实输出：
+
+```json
+{"id":26,"orderNo":"11b84480-...","userId":1,"shopId":1,"dishId":2,"quantity":1,
+ "totalYuan":26,"status":"CREATED",...}
+```
+
+**根源**（backend/takeaway/.../service/OrderService.java:48）：
+
+```java
+int qty = req.quantity() == null ? 1 : req.quantity();      // 手写"缺省即 1"
+```
+
+**读法**：业务里"要不要给缺省"是一个**产品决策**——它"看起来便民"（少传就是1份），
+代价是与**明确传 0 的人**经历了**完全不同的报错路径**（下一案）；且这个决策埋在 service 里，
+接口文档/前端/S06 的校验链任何一方都看不到它。
+**修复方向**（若决定"quantity 必填"）：record 字段 `@NotNull @Min(1) Integer quantity` +
+controller 加 `@Valid` → 缺字段/负数**都在 400 的同一条线**上被拦下且有分字段明细。
+
+### 实录 2：quantity: 0——手写校验把"客户端的锅"烧成了 500
+
+```bash
+curl -s -w '\nHTTP=%{http_code}\n' -m 5 -X POST http://127.0.0.1:8085/api/orders \
+     -H "Authorization: Bearer $AL" -H 'Content-Type: application/json' \
+     -d '{"shopId":1,"dishId":1,"quantity":0}'
+```
+
+真实输出：
+
+```json
+{"timestamp":"2026-09-15T04:31:22.307+00:00","status":500,"error":"Internal Server Error","path":"/api/orders"}
+HTTP=500
+```
+
+**根源**（OrderService.java:49）：`if (qty <= 0) throw new IllegalArgumentException("至少点 1 份");`
+——**检查本身在（事，好！）**，但出口在默认兜底 → 500；"至少点 1 份"这句人话** Client 终生未见**。
+
+**修复与再验证**（两条路都真改过的题）：
+
+```diff
+- public record BookReq(Long shopId, Long dishId, Integer quantity) {}
++ public record BookReq(Long shopId, Long dishId, @NotNull @Min(1) Integer quantity) {}
+  // 且 controller 参数前加 @Valid —— 空与 0 一起在入口变 400 + VALIDATION_FAIL
+```
+
+改后预期（S07 全链收编后）：`{"code":"VALIDATION_FAIL","msg":"quantity: 至少点 1 份",..."` HTTP=400。
+**再敲一次 S06 的分工铁律**：service 里的 `if (qty <= 0)` **不删**——它防的是**绕过 HTTP 的内部调用**
+（定时任务、Kafka consumer 复用 service）；**注解守 HTTP 的大门，手写守内部的门**，两层各守各的。
 
 ## 思考题
 > **补充小节：嵌套对象的级联校验（cascade）本课的收束点之一。**

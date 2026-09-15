@@ -1,8 +1,8 @@
-# N03 · gzip 与缓存头（bundle 实测：120910 → 52995 字节）
+# N03 · gzip 与缓存头（bundle 实测：120915 → 52999 字节，外加一次"修了 MIME 反而没 gzip"的连环坑）
 
-> **本节要点**：同一份 118 KiB 的 js，开着 gzip 走线上只有 52 KiB——近六成的流量就这么省下来了。本篇用三条 curl 实测 gzip 开/关的 `Content-Length` 差异，读懂 `Accept-Encoding` / `Content-Encoding` 协商协议，再前瞻 `Cache-Control` 与 `ETag`：压缩管"这次传多少字节"，缓存管"这次还要不要传"。
-> **前置知识**：N02（dist 与 pinned hash）、零起点-02（HTTP 报文结构）。
-> **产出**：会用 `curl -H 'Accept-Encoding: gzip' --compressed` 做字节对比实验；能解释 gzip 协商的请求/响应头闭环；能演示 ETag → 304 的白嫖流程。
+> **本节要点**：同一份 118 KiB 的 js，压缩后线上只走 52 KiB——近六成的流量省了下来。本篇用"同一份配置只动 gzip 开关"的实验室对比盯住 `Content-Length` 差异，读懂 `Accept-Encoding` / `Content-Encoding` 协商闭环；再实录一个今天才现形的连环坑：**include mime.types 修复了 js 的 Content-Type 却顺手关掉了它的 gzip**，直到给清单补上现代拼写才恢复。
+> **前置知识**：N02（dist 与 pinned hash、mime.types include）、零起点-02（HTTP 报文结构）。
+> **产出**：会做"只改一个开关"的 gzip A/B 实验；能解释"开了 gzip 却没压"的类型清单根因；能演示 ETag → 304 的白嫖循环。
 
 ---
 
@@ -10,12 +10,12 @@
 
 | 名词 | 英文 | 一句人话 | 在本项目哪里见到 |
 |---|---|---|---|
-| gzip | - | 流行的无损压缩；HTTP 层"先压缩再上路" | `nginx.conf` 第 15 行 `gzip on;` |
+| gzip | - | 流行的无损压缩；HTTP 层"先压缩再上路" | `nginx.conf` 第 18 行 `gzip on;` |
 | Accept-Encoding | - | 请求头：**我能解** gzip/br，你尽管压 | curl `-H 'Accept-Encoding: gzip'` |
 | Content-Encoding | - | 响应头：**这货是** gzip 压过的 | 实测响应里的开关标 |
 | Content-Length | - | 响应体的**线上字节数**（压缩后算） | 本站对比实验的主角 |
 | chunked | - | 分块传输（长度未知时用），压着传常伴随它 | 静态资源响应常见 |
-| ETag | - | 资源指纹（内容 hash），协商缓存凭据 | `ETag: "6aa7c46b-145"` 实测 |
+| ETag | - | 资源指纹（内容 hash），协商缓存凭据 | `ETag: W/"6aa8a592-1d853"` 实测 |
 | 304 Not Modified | - | "没变，用你缓存里的"——零字节应答 | 本站实验三实测 |
 | Cache-Control | - | 缓存政策：多久内不用问服务器 | 前瞻；配合 N02 的 hash 食用 |
 
@@ -44,53 +44,78 @@ gzip 是 HTTP 标准的内容压缩：服务器把响应体压一遍再发，浏
 
 ---
 
-## 2. 配置走查：nginx 的三行 gzip（真实行号）
+## 2. 配置走查：nginx 的三行 gzip（真实行号，今天的 conf）
 
-`infra/nginx/nginx.conf` 第 15~17 行（由 `nginx-reload.sh` 第 38~40 行生成）：
+`infra/nginx/nginx.conf` 第 18~20 行（由 `nginx-reload.sh` 第 41~43 行生成，**2026-09-15 修复后版本**）：
 
 ```nginx
-15:   gzip on;
-16:   gzip_types text/plain text/css application/javascript application/json;
-17:   gzip_min_length 100;
+18:   gzip on;
+19:   gzip_types text/plain text/css text/javascript application/javascript application/json;
+20:   gzip_min_length 100;
 ```
 
 逐行拆：
 
 - `gzip on;`——总开关；
-- `gzip_types`——**只压这些 MIME 类型**。注意 `text/html` 天生默认在列（写不写都压），所以列表里没有它；图片/视频不压（它们已是压缩格式，再压不省反亏）；
+- `gzip_types`——**只压这些 MIME 类型**。注意 `text/html` 天生默认在列（写不写都压），所以列表里没有它；图片/视频不压（它们已是压缩格式，再压不省反亏）。**清单里同时留了 `text/javascript` 与 `application/javascript` 两个拼写不是冗余，是实录（见第 4 节工程实录）**；
 - `gzip_min_length 100`——小于 100 字节不压（压小文件得不偿失，CPU 白花）。
 
-**教学提醒**：`gzip_types` 写错 MIME（比如把 js 写成 `text/javascript` 之外的老写法）是"明明开了 gzip 却没压"的头号原因——排查时先看响应的 `Content-Type` 对不对得上清单。
+**教学提醒**：`gzip_types` 与 `Content-Type` 对不上号是"明明开了 gzip 却没压"的头号原因——排查时先看响应的 `Content-Type`，再对照清单，最后确认 mime.types 给这个扩展名发的是哪种类型。
 
 ---
 
-## 3. 动手验证·一：压缩实测——同一文件的两种命运（今天实录）
+## 3. 动手验证·一：A/B 对比实验——同一文件、同一个 nginx、只差一个开关（今天实录）
 
-### 3.1 关（不带 Accept-Encoding，明文走线上）
+实验纪律：**只动一个变量**。用同一份 nginx 配置（N02 的 mime.types include、同一桶 dist）跑两个实例——生产 9090 是 `gzip on`，实验室 9093 的副本把总开关删掉，其余一字不差。这样差异 100% 归因于 gzip。
 
-```
-$ curl -s -o /dev/null -w "%{size_download} bytes\n" \
-    http://127.0.0.1:9090/train-ui/assets/index-De0t7uFW.js
-120910 bytes
-```
-
-### 3.2 开（会解 gzip，让它压）
+### 3.1 开（生产 9090，gzip on）
 
 ```
-$ curl -s -H 'Accept-Encoding: gzip' -o /dev/null -w "%{size_download} bytes\n" \
-    -D /tmp/h.txt http://127.0.0.1:9090/train-ui/assets/index-De0t7uFW.js
-52995 bytes
-$ grep -i content-encoding /tmp/h.txt
+$ curl -s -o /dev/null -D /tmp/n3on.txt -w "size_download=%{size_download}\n" \
+    -H 'Accept-Encoding: gzip' http://127.0.0.1:9090/train-ui/assets/index-DpBn_G5n.js
+size_download=120915
+$ grep -iE 'content-(encoding|type|length)' /tmp/n3on.txt
+Content-Type: text/javascript
+Content-Length: 120915
+```
+
+**注意实况**：带着 `Accept-Encoding: gzip` 却拿到了**明文 120915 字节**——gzip 开着却没压 js！这不是实验失误，正是今天真机现场抓到的连环坑（第 4 节拆案）。先把对照组做完。
+
+### 3.2 关（实验室 9093，除 gzip 总开关外全同）
+
+```
+$ curl -s -o /dev/null -D /tmp/n3off.txt -w "size_download=%{size_download}\n" \
+    -H 'Accept-Encoding: gzip' http://127.0.0.1:9093/train-ui/assets/index-DpBn_G5n.js
+size_download=120915
+$ grep -iE 'content-(encoding|type|length)' /tmp/n3off.txt
+Content-Type: text/javascript
+Content-Length: 120915
+```
+
+### 3.3 修复后再测（生产 9090）
+
+给清单补上现代拼写（第 4 节的 diff），`./infra/nginx-reload.sh` 重载：
+
+```
+$ curl -s -o /dev/null -D /tmp/n3fix.txt -w "size_download=%{size_download}\n" \
+    -H 'Accept-Encoding: gzip' http://127.0.0.1:9090/train-ui/assets/index-DpBn_G5n.js
+size_download=52999
+$ grep -iE 'content-(encoding|type|length)|etag' /tmp/n3fix.txt
+Content-Type: text/javascript
+ETag: W/"6aa8a592-1d853"
 Content-Encoding: gzip
 ```
 
-### 3.3 对比结论
+### 3.4 全程对比表（三轮实测，一表看完）
 
-| | 明文 | gzip | 省 |
+| | 关（9093OFF） | 开但类型不匹配（9090 修复前） | 开且类型命中（修复后） |
 |---|---|---|---|
-| 线上字节数 | **120910** | **52995** | **67915（56.2%）** |
+| 线上字节数 | 120915 | 120915 | **52999** |
+| Content-Encoding | （无） | （无） | **gzip** |
+| Content-Type | text/javascript | text/javascript | text/javascript |
+| 省 | — | — | **67916 字节（56.2%）** |
 
-**118 KiB → 52 KiB**，一倍流量白省。这就是"别人的 bundle 显得小"的真相之一：不是文件小，是线上传输的字节小。
+**118 KiB → 52 KiB**，一倍流量白省。这就是"别人的 bundle 显得小"的真相之一：不是文件小，是线上传输的字节小。而第一轮的对比小组还额外送了一条经验：**A/B 实验里如果两个组的结果一模一样，先怀疑"开关根本没拨到"再怀疑世界**。
 
 ### 3.4 `--compressed` 才是完整人设
 
@@ -106,37 +131,35 @@ $ curl -s -H 'Accept-Encoding: gzip' --compressed \
 
 `--compressed` 一条龙：自动带上 `Accept-Encoding: gzip` + 自动解压回明文。**记住分工**：`Accept-Encoding` 决定"压不压"（线上字节），`--compressed` 决定"curl 拿到后解不解"（本地显示）。
 
-> 实测小花絮：`curl -H 'Accept-Encoding: gzip' --compressed -w "%{size_download}"` 显示的是**解压后**的 253 字节（index.html 原文 325 字节，传输时另算 chunked 头）——`%{size_download}` 统计的是"curl 应用层拿到并解压后的字节"。**想量线上真实字节数，别加 `--compressed`**。这是新手实测时最常见的数字打架，本站踩给你看。
+> 实测小花絮：`curl -H 'Accept-Encoding: gzip' --compressed -w "%{size_download}"` 显示的是**解压后**的 336 字节（index.html 原文约 336 字节，传输时另算 chunked 头）——`%{size_download}` 统计的是"curl 应用层拿到并解压后的字节"。**想量线上真实字节数，别加 `--compressed`**。这是新手实测时最常见的数字打架，本站踩给你看。
 
 ---
 
-## 4. 动手实验二：三条 curl -I 全景（今天实录）
+## 4.9 动手实验二：三条 curl -I 全景（今天实录，修复后版本）
 
-**(1) 静态 js（gzip 命中 + ETag 在列）：**
+**(1) 静态 js（修完 gzip_types 后：类型命中 + gzip 生效 + 压缩把 ETag 降为弱指纹）：**
 
 ```
-$ curl -sI -H 'Accept-Encoding: gzip' http://127.0.0.1:9090/train-ui/assets/index-De0t7uFW.js
+$ curl -sI -H 'Accept-Encoding: gzip' http://127.0.0.1:9090/train-ui/assets/index-DpBn_G5n.js
 HTTP/1.1 200 OK
 Server: nginx/1.30.4
-Content-Type: text/plain
-Last-Modified: Mon, 14 Sep 2026 09:54:51 GMT
-ETag: "6aa7c46b-1d84e"
+Content-Type: text/javascript
+Last-Modified: Tue, 15 Sep 2026 09:01:31 GMT
+ETag: W/"6aa8a592-1d853"
 Content-Encoding: gzip
 ```
-
-> 注意 `Content-Type: text/plain`——文件扩展名 `.js` 没被 mime.types 认出来（本机 nginx 的 mime 配置没挂进这份极简 conf），所以 gzip 之所以照样压它，是因为我们**显式带了 Accept-Encoding** 且 nginx 对未识别类型默认也压。真实项目应让 js 被识别为 `application/javascript`（正好在 gzip_types 清单里）。
 
 **(2) 静态 html：**
 
 ```
 $ curl -sI http://127.0.0.1:9090/train-ui/
 HTTP/1.1 200 OK
-Content-Type: text/html
-Last-Modified: Mon, 14 Sep 2026 09:54:51 GMT
-ETag: W/"6aa7c46b-145"
+Content-Type: text/html; charset=utf-8
+Last-Modified: Tue, 15 Sep 2026 09:01:31 GMT
+ETag: W/"6aa8a592-145"
 ```
 
-`ETag: W/"..."` 的 `W/`＝weak（弱指纹，nginx 静态文件的默认形态，够用）。
+`ETag: W/"..."` 的 `W/`＝weak（弱指纹，nginx 对携带 gzip 的代理/静态响应自动降级）。
 
 **(3) 反代 API（注意：没有 ETag、没有 Content-Encoding）：**
 
@@ -157,19 +180,45 @@ Content-Type: application/json
 
 ---
 
-## 4.5 动手实验二·补：给 nginx 配上正确的 MIME（顺手修掉 4.2 的 text/plain）
+## 4. 工程实录：真实问题与解决——修 MIME 白屏的并发症："开了 gzip 却没压"
 
-第 4.2 节实测 js 的 `Content-Type: text/plain`——根因是这份极简 nginx.conf 没有 `include mime.types;`。修法（改 `nginx-reload.sh` 生成的 http 块）：
+**现场**（2026-09-15 全栈在线实测）：N02 把 `include /etc/nginx/mime.types;` 修进 http 块后，浏览器解析正确了（`.js` 身份证从"未识别的 text/plain"升级为 `text/javascript`）。但 gzip 被顺手打穿了：
 
-```nginx
-http {
-    include /etc/nginx/mime.types;     # ← 加这一行（或绝对路径 mime.types 文件）
-    default_type application/octet-stream;
-    ...
-}
+```
+$ curl -sI -H 'Accept-Encoding: gzip' http://127.0.0.1:9090/train-ui/assets/index-DpBn_G5n.js
+HTTP/1.1 200 OK
+Server: nginx/1.30.4
+Content-Type: text/javascript          ← 身份对了（这个是白屏修复的功劳）
+Content-Length: 120915                 ← 但一字节没压！
 ```
 
-修后重跑第 4.2 节的 curl，`Content-Type` 会变成 `application/javascript`——正好命中 `gzip_types` 清单，gzip 与浏览器解析双正确。**这个 30 秒的修复串起了本篇两个知识点**：MIME 类型是"文件身份证"，gzip_types 与浏览器行为都看它办事。
+逐段走一遍**排查链**（这条链以后能直接抄走）：
+
+1. `Content-Encoding` 缺席 → 先按总开关怀疑：`nginx -T | grep gzip` → `gzip on;` 在局。开关没坏；
+2. 再按数据格式怀疑：body 大于 `gzip_min_length 100`（120915 > 100），长度也没问题；
+3. 剩下唯一变量是**类型匹配**：`gzip -` 从 mime.types 里验扩展名——
+
+```
+$ grep -w js /etc/nginx/mime.types
+text/javascript                 js mjs;
+```
+
+4. 结论现形：本机 mime.types 把 `.js` 认成 `text/javascript`（现代写法），而 gzip_types 清单里只有老拼写 `application/javascript`——**类型对不上号，gzip 悄悄跳过**，且**不报任何错**。对照组里 html 一直被压（`text/html` 默认必压），正因为它是默认项才逃过修 MIME 的连带伤害。
+
+**修复 diff**（`infra/nginx-reload.sh` 第 42 行，前后各一行）：
+
+```diff
+-  gzip_types text/plain text/css application/javascript application/json;
++  gzip_types text/plain text/css text/javascript application/javascript application/json;
+```
+
+`./infra/nginx-reload.sh` 重载后复跑 3.4 的三条 curl——120915 → 52999（省 56.2%），闭合验证。**教训落成一句**：修一个问题的"正确姿势"（include mime.types）可能顺手改变另一个机制的前提条件（gzip_types 的类型匹配）；**改完配置必须复跑受影响的全部验证**，gzip 与 MIME 恰好是一本连环账。
+
+顺带一个实测彩蛋：压缩后静态文件的 `ETag` 从强指纹 `"..."` 变成了弱指纹 `W/"..."`——nginx 对 gzip 响应自动降级为 weak ETag（压缩前后的字节内容不同，弱化以示"协商但别拿它当字节级凭据"）。读头时能读出这三层的信息，你就是会看头的人了。
+
+## 4.5 历史案例存档：mime.types 缺席时代的 text/plain（对照伤疤）
+
+修复前的旧 conf 没有 include mime.types，那天实测 js 的 `Content-Type: text/plain`——gzip 之所以"误打误撞"也没压它，同样是类型不匹配（text/plain 根本不在旧清单里）。白屏事件从"浏览器解不了 ES module"升级为"配置三族错乱（解析 404 白屏 / 类型误判 / 压缩失效）"，全部由**一行的正确性与连锁反应**串成——这条连环的因果图值得给每个新同学画一遍：MIME 类型是"文件身份证"，它同时喂**浏览器**、**nginx 的 gzip_types**、以及一切按类型分流的中游（CDN、缓存层）。
 
 ---
 
@@ -187,7 +236,7 @@ http {
 ```
 $ ET=$(curl -sI http://127.0.0.1:9090/train-ui/ | grep -i etag | tr -d '\r' | cut -d' ' -f2)
 $ echo $ET
-"6aa7c46b-145"
+"6aa8a592-14e"
 
 $ curl -s -o /dev/null -w "%{http_code} (%{size_download} bytes)\n" \
     -H "If-None-Match: $ET" http://127.0.0.1:9090/train-ui/
@@ -199,7 +248,7 @@ $ curl -s -o /dev/null -w "%{http_code} (%{size_download} bytes)\n" \
 ### 5.3 两个头怎么配合 hash（N02 的钉子拔出）
 
 ```
-强缓存（max-age 一年）  →  管住"不重复下载 index-De0t7uFW.js"
+强缓存（max-age 一年）  →  管住"不重复下载 index-DpBn_G5n.js"
 内容 hash（文件名指纹）  →  管住"发新版必然换名 → 强缓存自动失效"
 ETag/304               →  管住"html 每次轻问一句有没有变"
 ```
@@ -273,7 +322,7 @@ gzip 不是无脑全开：
 ## 8. 自测题（五分钟能答完）
 
 1. `Accept-Encoding` 和 `Content-Encoding` 各是谁发给谁的？缺了前者会发生什么？
-2. 实测 gzip 把 120910 字节压到 52995——省下的字节去哪了？CPU 花在哪一步？
+2. 实测 gzip 把 120915 字节压到 52999——省下的字节去哪了？CPU 花在哪一步？
 3. 为什么 `gzip_types` 清单里没有 `text/html`，但 html 还是被压了？
 4. 304 的响应里 body 是 0 字节，浏览器从哪拿到页面内容？
 5. 静态 js 想配"管一年"的强缓存，前提条件是什么？没有这个前提会发生什么事故？
@@ -291,8 +340,8 @@ gzip 不是无脑全开：
 ## 9. 本节小结
 
 - gzip 协商：请求头 `Accept-Encoding`（我会解）↔ 响应头 `Content-Encoding`（我压了）。
-- 实测：`index-De0t7uFW.js` 明文 120910 字节，gzip 后 52995 字节，**省 56.2%**。
-- nginx 三行配置：`gzip on` + `gzip_types` 清单 + `gzip_min_length 100`（nginx.conf 第 15~17 行）。
+- 实测：`index-DpBn_G5n.js` 明文 120915 字节，gzip 修复后 52999 字节，**省 56.2%**。
+- nginx 三行配置：`gzip on` + `gzip_types` 清单 + `gzip_min_length 100`（nginx.conf 第 18~20 行）。
 - 静态资源有 ETag/304 的资格，动态 API 没有——实测三条 curl 的头差异就是分界线。
 - 缓存双轨：强缓存（Cache-Control）不问服务器，协商缓存（ETag/304）轻问一句；hash 让两者共存。
 

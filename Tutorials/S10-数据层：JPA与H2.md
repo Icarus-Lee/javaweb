@@ -161,7 +161,64 @@ be600d59-193b-455d-aaaf-7630acf3b90d | CANCELLED | 10
 
 ---
 
-## 4. 主键策略：IDENTITY 之外的会议
+## 4. 工程实录：真实问题与解决——删 id=99 返回 204 而不是 404，坑在 `deleteById` 的"善意"
+
+**问题**：把删除接口写成"直接 `repo.deleteById(id)`、成功就 204"——用户删一个**不存在的 id**，会得到什么？HTTP 里人人都以为 404；JPA 的真实答案是：**什么也不发生、200 系照常返回**（silent）。这在"前端已经更新列表"的场景没声没息，在审计口径里就是一笔糊涂账。
+
+### 现场复现
+
+给 `TaskController.java` **临时**加一个裸端点（实验后已撤，因为正式的 `delete()` 已含防护）：
+
+```java
+@DeleteMapping("/{id}/raw")   // 实验用：直通 repo.deleteById
+public ResponseEntity<Void> rawDelete(@PathVariable Long id) {
+    repo.deleteById(id);
+    return ResponseEntity.noContent().build();
+}
+```
+
+```bash
+mvn -q -pl demo-todo package -DskipTests
+java -jar demo-todo/target/demo-todo-1.0.0.jar --server.port=8094 --spring.datasource.url='jdbc:h2:mem:t10' > /tmp/opencode/t10.log 2>&1 &
+sleep 16
+curl -s -X POST 127.0.0.1:8094/api/tasks -H 'Content-Type: application/json' -d '{"title":"占位"}'   # {id:1,...}
+```
+
+**实测输出（今天 w/ Spring Boot 3.5 / Spring Data JPA 3.5）：**
+
+```
+$ curl -s -o /dev/null -w '%{http_code}\n' -X DELETE 127.0.0.1:8094/api/tasks/99/raw    # 不存在的 id=99
+204        ← 直通 repo.deleteById：**静默**，不抛、不报、反正 204
+
+$ curl -s -o /dev/null -w '%{http_code}\n' -X DELETE 127.0.0.1:8094/api/tasks/99       # 现有 delete()（带防护）
+404        ← 语义正确
+
+$ curl -s -o /dev/null -w '%{http_code}\n' -X DELETE 127.0.0.1:8094/api/tasks/1/raw    # 存在的 id
+204        ← 正常路径没问题
+```
+
+### 原因（源码级一句话）
+
+`SimpleJpaRepository.deleteById` 在走 **`findById(id).ifPresent(this::delete)`**——查不到就**直接不删**、无异常。它把"找到没有"的职责**悄悄留给调用方**。而 `toggle()`（PUT）走的是 `Optional.orElse(notFound)`，语义就是 404。同模块的两个方法一个实诚一个装瞎，只因背后 API 不同。
+
+### 修复思路（给出的姿势 = 本仓库 `TaskController.java:42-47`）
+
+```diff
+     @DeleteMapping("/{id}")
+     public ResponseEntity<Void> delete(@PathVariable Long id) {
++        if (!repo.existsById(id)) return ResponseEntity.notFound().build();   // 先问"有没有"
+         repo.deleteById(id);
+         return ResponseEntity.noContent().build();
+     }
+```
+
+- **existsById 方案**（本仓库选的）：一次 SELECT 换明确语义，读多写少场景成本低。
+- **替代姿势**：`long n = repo.delete(id-底版本AUTO写法=` deleteById("99"), `return n>0 ? 204 : 404` 的**计数型删除**（`@Modifying @Query("delete from Task t where t.id=:id") int deleteById(@Param("id") Long id);`）——只一趟 SQL 拿 RETURNING 行数判事。
+- **catch 空转式**（`try { repo.deleteById(id) } catch (EmptyResultDataAccessException e) { 404 }`）在**老版本** Spring Data（API 可能抛 `EmptyResultDataAccessException`）才行；本版本静默，catch 是死路——**又一次"以版本为准、以实测为准"**。
+
+---
+
+## 5. 主键策略：IDENTITY 之外的会议
 
 | 策略 | 谁发号 | 优点 | 代价 |
 |---|---|---|---|
@@ -191,20 +248,20 @@ findByFromCityAndToCityOrderById("上海虹桥","苏州") → WHERE from_city=? 
 
 ---
 
-## 5. 思考题（先想 3 分钟）
+## 6. 思考题（先想 3 分钟）
 
 1. `Task` 类里没有 `@Column(name="act_done")`。Hibernate 怎么决定列名？——推导：把 `done` 字段映射成列名的规则。
 2. `save()` 与 `saveAll()` 底层会有什么区别？什么时候这个差别会**变成真实性能差异**（提示：IDENTITY 与批量）。
 3. 为什么实体要求无参构造而 `protected` 就够？换成 `private` 会怎样？
 4. `Optional Booking findOrderNo` 若改名成 `findOrderNo1` 会发生什么（Spring Data 对这个方法名的反应）？
 
-## 6. 练习题
+## 7. 练习题
 
 1. 给 `Task` 增加一个 `createdAt`（`Instant`）字段并完成 `@PrePersist` 实现自动记账——保存时写入 now。验证：`GET /api/tasks` 每个新插入带时间。
 2. 新写 `List<Task> findByDoneOrderByIdDesc(boolean done)` 派生接口；`GET /api/tasks?done=true` 实测。
 3. 在你自己新拟的 `ExpireDemo`（S12 会用到）里额外用 H2 Shell 的 `SHOW COLUMNS`（对实体用纯 JDBC）演练主键列的类型差异：`BIGINT` vs `TIMESTAMP`。
 
-## 7. 参考答案
+## 8. 参考答案
 
 **练习 1**：
 
@@ -244,7 +301,7 @@ done   BOOLEAN     NO
 
 ---
 
-## 8. 本节小结
+## 9. 本节小结
 
 - 三层堆栈：接口 `JpaRepository` → Spring Data 代理 → EntityManager(Hibernate) → JDBC。
 - `@Entity`/`@Id`/`@GeneratedValue(IDENTITY)` 三注解是"类可存储"合同——表名/列名有默认推导规则。
@@ -254,7 +311,7 @@ done   BOOLEAN     NO
 
 ---
 
-## 9. 下一站
+## 10. 下一站
 
 数据不只要存，还要**多人同时改而不错**。S11：事务与并发下单——`@Transactional` 的"按逃回按钮"、`rollbackFor` 的陷阱、并发写余票的糟糕案例（本机实测：三个线程让 H2 库存"错账"了！），再 Arabian 到 train 已用的 Redis 原子方案，讲清"数据库锁 vs 应用分布式锁"。
 ---

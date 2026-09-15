@@ -5,6 +5,15 @@
 > 以及**部署**——本站 nginx-reload.sh 把 dist 挂到 `http://127.0.0.1:9090/train-ui/` 的真实流程。
 > 读完你就能解释："开发为什么热腾腾，生产为什么冷冰冰"。
 
+## 问题出发
+
+今天上午刚发生的两个真实事件，正是本篇的两条主线：
+① 训练线上敌人的**假热重载**——`nginx-reload.sh` 打印"已热重载"，但 9090 端口实为拒绝，
+浏览器一刷新就 `000`，smoke 从 24 全绿跌到 **20 通过 / 4 失败**（实录见本章工程实录节）；
+② 明早 bunld 出来的产物 hash 从 `index-De0t7uFW.js` 变成了 `index-DpBn_G5n.js`——因为 api.js 与
+vite.config.js 同一晚升过版：**内容变，hash 变**，这正是"内容指纹"的现场示范。
+读完全篇，你会回答：dev/HMR/build/nginx 三条路各怎么走、且真事故可以按下复现。
+
 ## 名词卡
 
 | 名词 | 人话 |
@@ -53,9 +62,10 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 export default defineConfig({
-  plugins: [vue()],                  // ← @vitejs/plugin-vue：教 Vite 认得 .vue 文件
+  base: '/train-ui/',              // ← 子路径部署：所有产物链接带此前缀（N02 三连修之一）
+  plugins: [vue()],                // ← @vitejs/plugin-vue：教 Vite 认得 .vue 文件
   server: {
-    port: 5180,                      // dev server 常驻端口
+    port: 5180,                    // dev server 常驻端口
     proxy: {
       '/apitrain': {
         target: 'http://127.0.0.1:8084',
@@ -66,20 +76,26 @@ export default defineConfig({
 })
 ```
 
-**proxy 一段是"前后端分离开发的桥梁"**：页面里 axios baseURL `/apitrain`（api.js:3，与 Nginx 反代别名同源，dev/prod 自己也能零改代），
-dev server 听到 `/api/...` 就**转手转发给 8084 的 train 后端**——你的浏览器只觉得"同源"。
-而生成的 nginx.conf 用 `/apitrain/` 前缀做同一件事（下文）——**一侧换风景，页面代码一个字不改**。
+**proxy + base 两段是"前后端分离开发/部署的桥梁"**：
+- `base: '/train-ui/'`：build 后所有资源 URL 上的公共前缀（这决定 dist 能被挂到 9090 的子路径下）。
+- `proxy`：页面里 axios 的 baseURL 是 `/apitrain`（api.js:3，与 Nginx 反代别名同源——dev/prod 双侧零改代）；
+  dev server 听到 `/apitrain/...` 就**转手转发给 8084** 且 `rewrite` 把前缀还原成后端认识的 `/api`。
+  生成的 nginx.conf 用 `location /apitrain/` 干同一件事（下文）——**一侧换风景，页面代码一个字不改**。
 
 ## 二、真实产物走查：frontend/train-ui/dist 列表真联动
 
-本机 build 过的产物（`ls -R frontend/train-ui/dist`）：
+本机 build 过的产物（`ls -R frontend/train-ui/dist`，2026-09-15 实测）：
 
 ```
 frontend/train-ui/dist/
 ├── assets/
-│   └── train-ui/assets/index-De0t7uFW.js ← 全部 JS（Vue + App.vue + api）（Vue + 你的 App.vue + api）合成的一坨
-└── index.html                      ← 瘦身后的入口（<script src="/train-ui/assets/index-De0t7uFW.js">（base 前缀已打进引用））
+│   └── index-DpBn_G5n.js           ← Vue + App.vue + api.js 三家合成的一坨（120.92 kB，gzip 46.61 kB）
+└── index.html                      ← 瘦身后的入口（引用上面的 hash 产物，base 前缀已打进引用）
 ```
+
+> **hash 变名的现场示范**：昨天的产物叫 `index-De0t7uFW.js`；今早 api.js（baseURL 统一为 `/apitrain`）
+> 与 vite.config.js（`base: '/train-ui/'`）升级后同一路径 build 出 `index-DpBn_G5n.js`——
+> **JS 字节差了，文件名就换**（无需人工 bump 版本）。这正是下表 hash 一行的意义。
 
 对比源码目录（src/ 一共 3 个文件：App.vue/main.js/api.js；node_modules 里几百的依赖）：
 
@@ -108,14 +124,15 @@ grep "script" dist/index.html        # 产物引用带 hash；dev 版引用 /src
 **预期形态**：
 
 ```
--rw-r--r-- 1 user user 62K dist/assets/index-*.js ← minified 主包（文件名 hash，每次内容变化即新名）
+-rw-r--r-- 1 user user 121K dist/assets/index-*.js   ← minified 主包（文件名 hash，内容变化即换名）
 ```
 
-（`hash` 指纹功能和"改动换名"是长缓存策略的基础——**产物一改、名全换、缓存必失效**。）
+（实际数字是 120.92 kB / gzip 46.61 kB——当你读到这里时 hash 与体量都可能又变了，那**正常**；
+`hash` 指纹功能和"改动换名"是长缓存策略的基础——**产物一改、名全换、缓存必失效**。）
 
 ## 二点五、为什么产物这么小：minify + tree-shake + hash 三件套
 
-`index-De0t7uFW.js` 62KB 管"Vue 整个框架 + 你的三份源码"，背后三板斧：
+`index-DpBn_G5n.js`（120.92 kB / gzip 46.61 kB）管"Vue 整个框架 + 你的三份源码"，背后三板斧：
 
 | 技术 | 干什么 | 人话对照 |
 |---|---|---|
@@ -126,6 +143,81 @@ grep "script" dist/index.html        # 产物引用带 hash；dev 版引用 /src
 **tree-shake 的生效前提**：模块必须可静态分析（ESM 的 import/export 是编译期"看得见"的）。
 `require()` 那种动态老形态装不下分析，摇不动——这也是现代前端坚持 ESM 的硬理由。
 Java 的对照：Maven 打包粒度是 jar，没有"按单个函数摇掉无用代码"的概念；而 JS 的依赖能沿"单个导出函数"粒度摇出来——产物因此能压得很贴身。
+
+## 三点七、工程实录：踩坑与修复（真机实录）
+
+### 实录 1（背景，一笔带过）：MIME 白屏——N02 主线的"文件级修复"
+
+今天早上的第一个坑是 `.js` 被 Nginx 挡成 `text/plain` 后浏览器拒执行 ES 模块 → **子路径白屏**。
+**修复一行**：nginx.conf 里 `include /etc/nginx/mime.types;`——完整复现、排查、验证与截图在
+**N02("前后端解耦：静态站建立") 第 7.5 章**，本篇不重复，只提醒：**静态资源部署事故几乎都是"浏览器收到了什么"的问题**，看 Network 面板 Response Headers 即见底。
+
+### 实录 2（本篇主菜）：陈旧 pid 引发的"假热重载"——脚本嘴上绿灯，9090 静默拒绝
+
+**问题**：今早 `bash infra/start-all.sh` 一切"正常打印"，但任何 `/apitrain/*` 都 `Connection refused`：
+脚本第 4 步在说"nginx: 已热重载"，而 smoke 的 4 条 nginx 断言全败（smoke 尾打 `20 通过 / 4 失败`）。
+
+**现场复现**（分两步，全部真机 2026-09-15 12:51 实录）：
+
+```bash
+# 步骤 A：真杀掉 nginx master，但把 pid 文件指向一个"活着"的其他进程（模拟 pid 被复用）
+RPID=$(cat logs/redis.pid); echo "$RPID" > infra/nginx/run/nginx.pid
+ss -tln | grep -c 9090                     # → 0 ：nginx 实际没监听
+bash infra/nginx-reload.sh                 # → 打印：nginx: 已热重载     ← ⚠️ 假话
+
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:9090/apitrain/trips
+# 000                        ← 连接拒绝，浏览器就是白屏
+python3 infra/smoke.py | tail -1
+# smoke: 20 通过 / 4 失败     ← smoke 里 nginx 四断言，故精确掉 4 条
+```
+
+**排查路径**（三步看穿）：
+
+```bash
+# ① 证据一：pid 文件里的 pid，是谁？
+ps -p $(cat infra/nginx/run/nginx.pid) -o pid,comm
+#    → redis/其他进程：kill -0 判活成功，脚本误以为"nginx 还在跑"
+
+# ② 证据二：直接手跑 reload，去掉脚本里的 >/dev/null 2>&1（真相没人看）：
+nginx -s reload -c /home/icaruslee/Projects/javaweb/infra/nginx/nginx.conf 2>&1
+# 2026/09/15 12:51:43 [emerg] ... : open() "...": failed ...  ← 退出码 1
+#    名面上 master 已死，reload 变"无人听海"，但 stderr 早被脚本吞了 → 假话无人报错
+
+# ③ 结论：kill -0 判活 + 吞错 reload，两个"省心写法"叠加出静默故障。
+```
+
+**修复与二次验证**：
+
+```bash
+rm -f infra/nginx/run/nginx.pid        # 假 pid 摘掉（防 pid 复用；或读 ps 真核对再删）
+nginx -c /home/icaruslee/Projects/javaweb/infra/nginx/nginx.conf   # 冷启
+ss -tln | grep 8090/9090               # → 9090 回来
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:9090/apitrain/trips  # → 200
+python3 infra/smoke.py | tail -1       # → smoke: 24 通过 / 0 失败
+```
+
+（全部命令真机跑过，24/24 复绿。）
+
+**一行级改进建议**（脚本加固，留给读者动手）：
+
+```bash
+# 原：nginx -s reload -c "$NG/nginx.conf" >/dev/null 2>&1 && echo "nginx: 已热重载"
+# 提议：不再吞错；且必要时先验证 master 存在：
+if ! nginx -t -c "$NG/nginx.conf" 2>/dev/null; then exit 1; fi
+# reload 后立刻 curl 探一次：失败自动降级冷启 → 假"已热重载"不可能再出场
+```
+
+**教学点**：
+- `>/dev/null 2>&1` 把 reload 的报错全文吞掉（`[emerg]` 只进脚本耳朵再被扔）；"吞错 + 进程判活"
+  两种省心写法叠加才是本次静默故障的完整成因——对比：`start_jar()` 用**端口探测**就诚实得多（S01 实录）。
+- smoke 的价值再次应验：**脚本说"Yeah"与系统说"Yeah"可以是两种声音**，而 smoke（具体的 curl 断言）
+  只信 000/200。
+
+### 实录 3：hash 变名的"现场记录"（观察记录，一类问题=1）
+
+见本章第二节"hash 变名的现场示范"框注——`De0t7uFW → DpBn_G5n` 的改名完全自动。
+**动手自查**（不抹机重证）：`sha1sum dist/assets/index-*.js` 与文件名 hash 前段逐次对上——
+产物**内容演进史可完全从文件名读出**，这就是"部署可回滚"的物理基础：旧 hash 的文件还在缓存/归档里，一指过去就回去了。
 
 ## 三、部署走查：本站 nginx-reload.sh 的真实流程
 

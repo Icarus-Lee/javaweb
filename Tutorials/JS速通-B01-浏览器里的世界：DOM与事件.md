@@ -17,7 +17,15 @@
 | DevTools Console | 浏览器内置的"JS 现场 REPL"，等价于浏览器里开 Python REPL |
 | `document.querySelector` | 按 CSS 选择器找 DOM 节点（下文最常用 API） |
 
-## 一、人话：网页是一个"活的对象树"
+## 问题出发
+
+一件真事：外卖小站 `takeout-ui` 打开后，用户在"我的订单"处等 3 秒就该看到骑手进度——这靠的是
+`setInterval(loadMine, 3000)` 每 3 秒自己发一次请求"假装推送"。本篇要回答两个问题：
+① 浏览器里的 JS 到底是什么（凭什么能改页面、还能"每 3 秒活一次"）；
+② 这套"改 DOM + 事件循环"的心法在你翻真码（frontend/takeout-ui/src/App.vue）时怎么一眼看懂。
+**跑起来看的姿势**：`bash infra/start-all.sh` 后开 http://127.0.0.1:9090/train-ui/ ，F12 → Console。
+
+## 一、概念人话：网页是一个"活的对象树"
 
 浏览器把 HTML 从标签串解析成**一棵节点树**，每个标签是一个节点对象：
 
@@ -111,6 +119,61 @@ console.log('2 同步');
 `window → document → …祖先 → 目标元素`（捕获），然后**倒序**回传（冒泡）。
 你绑 `@click`（Vue 语法，本质仍是 addEventListener）时默认监听冒泡阶段——
 所以"点里层按钮，外层 div 的 click 也触发"是常态。
+
+## 三点五、工程实录：踩坑与修复（真机实测）
+
+### 实录 1：主线程一个堵货循环，定时器延迟 3.5 倍——事件循环不是玄学
+
+**问题**：同事抱怨"轮询为什么不准点？说好 3 秒一次， sometimes 快 1 秒慢 3 秒"。根子就在本篇的主线程模型。
+
+**现场复现**（node 当浏览器引擎，同一套 event loop）：
+
+```bash
+node -e '
+const t0 = Date.now();
+setTimeout(() => console.log("定时到点 实际延迟(ms)=", Date.now()-t0), 100);
+const start = Date.now();
+while (Date.now() - start < 350) {}          // 模拟一次"computed 堵主线程"
+console.log("阻塞主线程 350ms 结束");
+setTimeout(()=>console.log("宏任务"),0);
+Promise.resolve().then(()=>console.log("微任务"));
+console.log("同步");
+'
+```
+
+真实输出（本机实录 2026-09-15）：
+
+```text
+阻塞主线程 350ms 结束
+同步
+微任务
+定时到点 实际延迟(ms)= 352
+宏任务
+```
+
+**逐行解读**：`setTimeout(…,100)` 在主线程被 350ms 的 while 堵住后，**实际 352ms 才到点**——
+"定 100ms"的真实语义是"**100ms 后登记进队**，何时执行要看主线程空不空"。输出顺序
+`同步 → 微任务 → 宏任务` 也当场坐实了本篇"先清微任务、再取宏任务"的循环口诀。
+
+**排查路径**：DevTools **Performance** 面板录 3 秒，火墙山一样的一格"Task"就是堵货回调。
+**修复姿势**：不要在一个回调里干完整批计算（比如渲染 5 万行表格）——分片（`requestIdleCallback`）或
+`Web Worker`；本项目 takeout-ui 只拉 5 条订单所以没事，就是这个提醒的真实底色。
+
+### 实录 2：takeout-ui 的"每 3 秒一发"轮询，为什么关页面前要先"摘灯"
+
+真码（frontend/takeout-ui/src/App.vue:55-56）：
+
+```js
+let timerId = null
+onMounted(() => { loadMenu(); timerId = setInterval(loadMine, 3000) })
+onUnmounted(() => clearInterval(timerId))      // ← 没这行，组件死了定时器还活着
+```
+
+**为什么这样写**：派单是 Kafka 异步的（W03），前端没有服务器推送通道，只能"轮询假装推送"。
+若去掉 `onUnmounted` 那行，`router` 切走后组件"死了"，timer 还在 subscribing"每 3 秒发一次
+`/apitakeout/orders/mine`"——DevTools Network 面板能看到鬼魅般的线程（内存泄漏 + 后端白负担）。
+**一句警告**：真码里 `let timer = null`（App.vue:12）与 `let timerId = null`（App.vue:55）
+两个定时器句柄并存，是教学演进痕迹——**要明确用哪个 handle 去 clear**，别把"没关灯"的原因埋在这种同名不同变量里。
 
 ## 二点九、预告：Vue 是"自动化的你"
 

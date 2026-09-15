@@ -4,6 +4,12 @@
 >
 > 学完本课你将能：读懂 `@SpringBootApplication` 的三层合成、说清"零配置"到底谁在做工、并亲手把 demo-todo 从零拉起到 curl 通。
 
+## 问题出发
+
+现实里第一条"起不来"往往和 Spring 和零配置无关：**端口被人占了**。本课在"空转跑起来"之前，
+先把这一幕现成了实录：`java -jar` 起了第二份 demo-todo，Spring Boot 启动**3 秒内主动fail-fast 报人话**；
+不靠猜、不靠 debug，只要读启动日志。连同"一键起全栈"的幂等设计，这是"空转"这个课程最真实的两块砖。
+
 ## 本站名词卡
 
 | 名词 | 一句话人话 |
@@ -245,6 +251,52 @@ smoke: 23 通过 / 0 失败
 ```
 
 这 22 条覆盖 5 个服务、Kafka 在线、两条 API 主链与 nginx 反代。**本系列后续每课的动手验证，环境有怀疑时都可重跑它。**
+
+## 五、工程实录：踩坑与修复（真机实测）
+
+### 实录：同一端口起第二份 demo-todo——3 秒 fail-fast，报错长这样
+
+**问题**：手滑 `java -jar backend/demo-todo/target/demo-todo-1.0.0.jar` 起了两份（8081 已被占用）；
+我机上的真实复现（2026-09-15）：
+
+```bash
+cd ~/Projects/javaweb && source infra/env.sh
+timeout 30 java -jar backend/demo-todo/target/demo-todo-1.0.0.jar > /tmp/s01dup.log 2>&1
+grep -B8 "Action:" /tmp/s01dup.log
+```
+
+真实输出（原样全文途中丢失了 ASCII 框，其余一字未裁）：
+
+```text
+APPLICATION FAILED TO START
+***************************
+
+Description:
+
+Web server failed to start. Port 8081 was already in use.
+
+Action:
+
+Identify and stop the process that's listening on port 8081 or configure this application to listen on another port.
+```
+
+**逐行解读**：
+- **这错在 Tomcat 起来之后**（账本 1 的自动装配正常、扫描成功、Bean 全造好）——失败点只在"最后一脚"：内嵌 Tomcat `bind 8081`。
+- Action 一句是**行动建议**不是废话：修法确实只有两条——"停掉占端口的进程"或"今晚换端口"。
+- 对比 C/C++ 的 `bind: Address already in use`：框架报错好在**没给内存地址、给了人话+两个解法**，这就是 starter 链路"工程友错"的入门自我展示。
+
+**排查路径**：
+
+```bash
+ss -tlnp | grep 8081        # → users:(("java",pid=81746,...))：谁占的、pid 多少
+kill $(cat logs/demo-todo.pid)   # 或按 pid 停
+```
+
+**修复与小结**：
+- 想到幂等：`bash infra/start-all.sh` 重复执行时全部走"已在线（$port）"分支，
+  第二份实例这种失误被"直接不启动"兜住了；**幂等不是玄学，是端口探测 + 早退**。
+- 但仍要警惕脚本之外的手动 `nohup java -jar`：它不写 pid、不写日志目录，没有被幂等外壳保护——
+  端口冲突时的真实信号就只有上文中那句 fail-fast。**读启动日志是"起不来"的第一站**。
 
 ## 思考题
 1. 把 `TodoApp` 从 `com.javaweb.todo` 挪进 `com.javaweb.todo.app`，而 Controller 留在原处，`curl /api/tasks` 还通吗？为什么？（提示：`@ComponentScan` 以谁为根）

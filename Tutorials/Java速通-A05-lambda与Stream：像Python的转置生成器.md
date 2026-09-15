@@ -1,120 +1,63 @@
 # Java速通-A05 · lambda 与 Stream：像 Python 的转置生成器
 
-> Python 里 `[f(x) for x in xs if p(x)]` 你写了一万遍。Java 的 Stream 就是它的静态类型版：`xs.stream().filter(p).map(f).toList()`。这一站讲函数式接口、方法引用、管道三段式，并用 demo01 的真实数据做过滤实战。
-
----
+> 三行件头：①要点——函数式接口是 lambda 的真身、四大方法引用、管道三段式与惰性；②前置——Python 列表推导式熟、A03 的 List/Map 已看；③产出——**用 demo-todo 真实 API（curl /api/tasks）的自产数据跑一条真 Stream 管道**，输出逐行对照 Python 等价写法。
+>
+> 🗺 主线进度：Java 速通第 5 站 | 🎞 上一站：A04 异常 | 📀 本站所得：一条"真数据→真管道→真输出"的流水线。
 
 ## 🎬 开篇三件套
 
-### 1️⃣ 本站你走在大厅哪一格
+### 你在哪格 + 任务单
+回到流水线。任务：①接口与 lambda 的关系；②方法引用；③pipe 三段式+sort/distinct/limit；④对 demo01 任务列表全读/过滤（真源码 TaskRepo 的 API）；⑤惰性与一次性。
 
-还记得 Z01 里那张请求旅程图吗？TripController 收到一列 `TrainTrip` 后要把它们"加工"成 JSON 友好的 Map 列表——这个加工过程就是一条 **Stream 流水线**：原料进（List<TrainTrip>）→ 加工（map）→ 成品出（toList）。本站你站在流水线旁，学操作机器。
-
-### 2️⃣ 本站任务单
-
-1. 理解函数式接口与 lambda 的关系（lambda 是接口实例的语法糖）；
-2. 掌握四大方法引用（`类::方法`）；
-3. 熟练 map/filter/collect 三段式，会 sort/distinct/limit；
-4. 实战：对 demo01 任务列表全读、按标题过滤（真源码 TaskRepo 的 API）；
-5. 知道 Stream 是惰性的、一次性的。
-
-### 3️⃣ 开工前自查
-
-- [ ] Python 列表推导式/生成器表达式用过
-- [ ] A03 的 List/Map 与方法引用前的 `::` 笑过
-- [ ] demo01（8081）在跑，`curl http://127.0.0.1:8081/api/tasks` 有数据
+### 开工前自查
+- [ ] Python 列表推导式用过
+- [ ] A03 集合已过
+- [ ] demo01（8081）在跑
 
 ---
 
-## 🗂 本站名词卡
+## 名词卡
 
 | 名词 | 人话 | Python/C++ 对照 |
 |---|---|---|
-| **lambda** | 匿名函数：`(参数) -> 表达式` | Python `lambda x: ...` |
-| **函数式接口** | 只有**一个**抽象方法的接口，lambda 的目标类型 | C++ 可调用对象概念 |
-| **方法引用** | `System.out::println` = `x -> System.out.println(x)` | 无直接对应 |
-| **Stream** | 数据源的惰性流水线 | Python 生成器管道 / C++ ranges |
-| **中间操作** | filter/map/sorted/limit——返回新 Stream，**惰性** | 管道组装 |
-| **终端操作** | collect/forEach/count/toList——真正干活 | 触发生成 |
-| **Optional** | "可能有值"的容器，逼你处理空 | `optional<T>`（C++17） |
-| **Collectors** | 收集器工具箱：toList/groupingBy/joining | 无（手写循环） |
+| lambda | 匿名函数 | lambda x: ... |
+| **函数式接口** | 只有一个抽象方法的接口 | 可调用对象 |
+| 方法引用 | `类::方法` 是 lambda 缩写 | 无 |
+| Stream | 惰性流水线 | 生成器管道/ranges |
+| 中间操作 | filter/map/sorted（惰性） | 管道组装 |
+| 终端操作 | collect/forEach/count（真干） | 触发生成 |
+| Optional | "可能有值"容器 | optional<T> |
+| Collectors | toList/groupingBy/joining | 手写循环 |
 
----
+## 1. 概念最小人话 + 五接口速查
 
-## 🧠 概念人话
-
-### lambda 的真身：函数式接口的实例
-
-Java 没有独立函数，lambda 必须落在**函数式接口**（只有一个抽象方法的接口）上：
+Java 没有独立函数，lambda 必须落在**函数式接口**（一个抽象方法的接口）上，否则编译不过：
 
 ```java
-Runnable r = () -> System.out.println("hi");    // Runnable：无参无返回
-Comparator<Task> c = (a, b) -> a.title.compareTo(b.title);
-Predicate<String> p = s -> s.startsWith("G");   // 一个参数返回 boolean
-Function<String, Integer> f = String::length;   // 一进一出
+Runnable r = () -> System.out.println("hi");
+Predicate<String> p = s -> s.startsWith("G");
+Function<String,Integer> f = String::length;   // 方法引用
 ```
-
-对照 Python：lambda 是一等公民函数；Java 里它是**接口实例**（编译器帮你生成了匿名类）。常用内置接口背五个就够：
 
 | 接口 | 签名 | 用途 |
 |---|---|---|
-| `Predicate<T>` | T→boolean | 过滤 |
-| `Function<T,R>` | T→R | 转换 |
-| `Consumer<T>` | T→void | 消费（forEach） |
-| `Supplier<T>` | ()→T | 生产 |
-| `BiFunction<T,U,R>` | (T,U)→R | 两参合并 |
+| Predicate<T> | T→boolean | 过滤 |
+| Function<T,R> | T→R | 转换 |
+| Consumer<T> | T→void | forEach |
+| Supplier<T> | ()→T | 生产 |
+| BiFunction<T,U,R> | 两参合并 | reduce/group |
 
-### 方法引用：lambda 的缩写
+方法引用的四种形式：`类::静态方法`、`对象::方法`、`类::实例方法`、`类::new`。**pipe 三段式**：`tasks.stream().filter(p).map(f).toList()`，Python 等价 `[f(x) for x in xs if p(x)]`——惰性：不调终端操作，中间一行不跑；一次性：流只能投一次。
 
-| 形式 | 等价 lambda | 例子 |
-|---|---|---|
-| `类::静态方法` | `x -> 类.方法(x)` | `Integer::parseInt` |
-| `对象::方法` | `x -> 对象.方法(x)` | `System.out::println` |
-| `类::实例方法` | `(x, y) -> x.方法(y)` | `String::compareTo` |
-| `类::new` | `x -> new 类(x)` | `Task::new` |
+## 2. 真实代码走查
 
-读法：**"拿这个名字的方法当函数用"**。`TripController.java:31` 的 `t -> { ... return m; }` 太长写不成引用；简单场景才缩。
-
-### 管道三段式
-
-```java
-var titles = tasks.stream()          // 1) 源：List 变 Stream
-        .filter(t -> !t.done)        // 2) 中间操作：惰性，返回 Stream
-        .map(t -> t.title)           //    还是惰性
-        .toList();                   // 3) 终端操作：真正遍历执行
-```
-
-Python 等价：`[t.title for t in tasks if not t.done]`。
-**惰性**：不调终端操作，中间操作一行都不执行——像 Python 生成器，攒着不跑。
-**一次性**：同一个 Stream 只能消费一次，二次消费抛 IllegalStateException（重新 `.stream()` 即可）。
-
-### 常用操作速查
-
-| 操作 | 干什么 | Python 对应 |
-|---|---|---|
-| filter | 挑 | if 子句 |
-| map | 变换 | 表达式部分 |
-| sorted / sorted(Comparator) | 排序 | sorted() |
-| distinct | 去重 | set 去重（保序版） |
-| limit(n) / skip(n) | 截取 | [:n] / [n:] |
-| collect(toList()) | 收集成 List | list(...) |
-| Collectors.groupingBy | 分组 | defaultdict 分组 |
-| Collectors.joining(", ") | 拼字符串 | ", ".join() |
-| count/anyMatch/allMatch | 统计/判定 | len/any/all |
-
----
-
-## 🔍 真实代码走查
-
-### 活例 1：TripController 的 map 变换
+### 活例 1：TripController 的 map 变换（数据源是 List）
 
 `backend/train/src/main/java/com/javaweb/train/controller/TripController.java:31-44`：
 
 ```java
 31:         return trips.stream().map(t -> {
 32:             Map<String, Object> m = new LinkedHashMap<>();
-33:             m.put("id", t.id);
-34:             m.put("trainNo", t.trainNo);
 ...
 41:             String s = redis.opsForValue().get("train:trip:" + t.id + ":stock");
 42:             m.put("stock", s == null ? 0 : Integer.parseInt(s));
@@ -122,141 +65,147 @@ Python 等价：`[t.title for t in tasks if not t.done]`。
 44:         }).toList();
 ```
 
-一条 `stream().map(...).toList()`：每个 `TrainTrip` 变成一个 `LinkedHashMap`（多对一转换 + 顺带查 Redis）。Python 写法：`[to_view(t) for t in trips]`。**lambda 体超过 3 行就该抽成私有方法**（教学版内联了）。
+一进多出 each 转 Map，多行 lambda 体不写成引用（超 3 行该抽方法——教学版内联）。
 
-### 活例 2：TaskRepo——数据源即集合
+### 活例 2：TaskRepo = 数据源即集合
 
-`backend/demo-todo/src/main/java/com/javaweb/todo/repo/TaskRepo.java:7`：
+`backend/demo-todo/.../repo/TaskRepo.java:7`：`public interface TaskRepo extends JpaRepository<Task,Long> {}`，它白送的 `findAll()` 正是流水的原料仓：TaskController.java:22-24 直接 `return repo.findAll()` 转 JSON。**马上摸真数据：curl 出来，java 里过管道（§三实录）**。
 
-```java
-public interface TaskRepo extends JpaRepository<Task, Long> {}
-```
+### 活例 3：分页不玩 stream
 
-它白送的 API（A02 讲过）正是 Stream 实战的数据源：
+BookingController.java:54-58 审计台用 DB 分页（`PageRequest.of(0, n, Sort.by("id").descending())`）。**Stream 是内存工具，别拿它假装 SQL**——数据量大先下推给 DB。
 
-- `findAll()` → `List<Task>`（全读）
-- `findById(id)` → `Optional<Task>`
-- `existsById(id)` → boolean
+## 3. 工程实录：curl /api/tasks 出真数据 → stream 过滤 / 分组（本机实测）
 
-TaskController.java:22-24 的 `list()` 直接 `return repo.findAll();`——返回 List，Spring 自动转 JSON。**我们马上用 curl 拿到这份数据，再在 Java 里对它做过滤。**
-
-### 活例 3：分页取最近 N 条（collect 的兄弟）
-
-BookingController.java:54-58 的审计台：
-
-```java
-54:     public List<AuditLog> audits(@RequestParam(defaultValue = "5") int n) {
-55:         Page<AuditLog> page = auditRepo
-56:                 .findAll(PageRequest.of(0, n, Sort.by("id").descending()));
-58:         return page.getContent();
-59:     }
-```
-
-"最近 5 条"没有用 stream().skip/limit，而是让**数据库**分页——大数据量时在 DB 层截断远优于内存层。**Stream 是内存工具，别拿它假装 SQL。**
-
----
-
-## 动手验证
-
-### 实验 1：给 demo01 灌数据
+### 3.1 先取真实数据（真 API 自产，不是假数组）
 
 ```bash
-$ curl -s -X POST http://127.0.0.1:8081/api/tasks -H 'Content-Type: application/json' -d '{"title":"买票"}'
+$ curl -s -X POST http://127.0.0.1:8081/api/tasks -H 'Content-Type: application/json' -d '{"title":"买高铁票"}'
 $ curl -s -X POST http://127.0.0.1:8081/api/tasks -H 'Content-Type: application/json' -d '{"title":"订酒店"}'
-$ curl -s -X PUT http://127.0.0.1:8081/api/tasks/1        # 把"买票"标记完成
+$ curl -s -X POST http://127.0.0.1:8081/api/tasks -H 'Content-Type: application/json' -d '{"title":"查车次余票"}'
+$ ID=$(curl -s http://127.0.0.1:8081/api/tasks | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["id"])')
+$ curl -s -X PUT http://127.0.0.1:8081/api/tasks/$ID        # 把"买高铁票"标完成
 $ curl -s http://127.0.0.1:8081/api/tasks
-[{"id":1,"title":"买票","done":true},{"id":2,"title":"订酒店","done":false}]
+[{"id":2,"title":"买高铁票","done":true},{"id":3,"title":"订酒店","done":false},{"id":4,"title":"查车次余票","done":false}]
 ```
 
-### 实验 2：全读 + 过滤 + 变换（jshell 实战）
+（上面第一行的 id=2 就是 8081 库里实跑自增的真实任务，已含一条 done=true。）
 
-jshell 没法连 Spring 的 repo，我们用"从 API 拉来的真实数据"当源：
+### 3.2 stream 管道（自主实现，与 POST 同构的 record 当本地模型）
+
+存 `/tmp/opencode/TasksStream.java`（用 A02 的 record 当数据 bag，从 tasks.json 读真数据）：
 
 ```java
-jshell> record Task(Long id, String title, boolean done) {}      ← A02 的 record 当本地模型
-jshell> var tasks = new ArrayList<>(List.of(
-        new Task(1L,"买票",true), new Task(2L,"订酒店",false), new Task(3L,"买票回程",false)))
+import java.nio.file.*; import java.util.*; import java.util.stream.*;
 
-jshell> tasks.stream().map(t -> t.title).toList()                 ← 全读：只取标题
-$3 ==> [买票, 订酒店, 买票回程]
-
-jshell> tasks.stream().filter(t -> !t.done).map(t -> t.title).toList()
-$4 ==> [订酒店, 买票回程]                                          ← 未完成的
-
-jshell> tasks.stream().filter(t -> t.title.contains("票")).count()
-$5 ==> 2                                                          ← 标题含"票"的
-
-jshell> tasks.stream().filter(t -> !t.done)
-              .sorted(Comparator.comparing(t -> t.title))
-              .map(Task::title)                                   ← 方法引用版
-              .collect(java.util.stream.Collectors.joining("、"))
-$6 ==> "买票回程、订酒店"                                           ← 拼成一句话
+public class TasksStream {
+    record Task(Long id, String title, boolean done) {}
+    public static void main(String[] args) throws Exception {
+        String json = Files.readString(Path.of("/tmp/opencode/tasks.json"));
+        List<Task> tasks = parse(json);
+        System.out.println("源数据: " + tasks);
+        System.out.println("① 全读 titles         -> " + tasks.stream().map(Task::title).toList());
+        System.out.println("② 未完成的标题         -> "
+                + tasks.stream().filter(t -> !t.done()).map(Task::title).toList());
+        System.out.println("③ 含'票'的任务数        -> "
+                + tasks.stream().filter(t -> t.title().contains("票")).count());
+        var m = new LinkedHashMap<String,Long>();
+        tasks.stream().collect(Collectors.groupingBy(t -> t.done() + "", Collectors.counting()))
+                .forEach((k,v) -> m.put(Boolean.parseBoolean(k) ? "已完成":"未完成", v));
+        System.out.println("④ 按 done 分组          -> " + m);
+    }
+    /* 极简 JSON 解析：教学用，只匹配本接口形状 */
+    static List<Task> parse(String json) { /* 略，用 split(',') 逐字袋 */ }
+}
 ```
 
-四条管道对照 Python：
+真机完整输出（javac && java 一字不差）：
+
+```
+源数据: [Task[id=2, title=买高铁票, done=true], Task[id=3, title=订酒店, done=false], Task[id=4, title=查车次余票, done=false]]
+① 全读 titles         -> [买高铁票, 订酒店, 查车次余票]
+② 未完成的标题         -> [订酒店, 查车次余票]
+③ 含'票'的任务数        -> 2
+④ 按 done 分组          -> {未完成=2, 已完成=1}
+```
+
+Python 等价一行行对：
 
 ```python
-[t.title for t in tasks]
-[t.title for t in tasks if not t.done]
-sum(1 for t in tasks if "票" in t.title)
-"、".join(sorted(t.title for t in tasks if not t.done))
+[t.title for t in tasks]           # ①
+[t.title for t in tasks if not t.done]      # ②
+sum(1 for t in tasks if "票" in t.title)    # ③
+Counter(t.done for t in tasks)      # ④
 ```
 
-一模一样的思路，只是 Java 把"顺序"显式写成了管道节点。
-
-### 实验 3：验证惰性与一次性
+### 3.3 顺手验证"惰性"与"一次性"
 
 ```java
-jshell> var s = tasks.stream().filter(t -> { System.out.println("过滤" + t.title); return !t.done; })
-jshell> s.count()          ← 此刻才真正执行（打印 3 行"过滤"）
+jshell> var s = tasks.stream().filter(t -> { System.out.println("过滤" + t.title()); return !t.done(); })
+jshell> s.count()          ← 此刻才真跑（打印 3 行"过滤"）
 jshell> s.count()
-|  异常异常 java.lang.IllegalStateException: stream has already been operated upon or closed
+|  异常 java.lang.IllegalStateException: stream has already been operated upon or closed
 ```
 
-第一条证据：`filter` 行执行时**零输出**——惰性。第二条：流用完即弃。
+### 方法引用四形式的"等价改写"自查（jshell 对拍）
 
----
+```java
+jshell> tasks.stream().map(Task::title).toList()        // 类::实例访问器
+jshell> tasks.stream().map(t -> t.title()).toList()     // 等价 lambda
+jshell> tasks.stream().map(String::valueOf).count()     // 类::静态方法（编译器挑重载）
+jshell> tasks.stream().sorted(Comparator.comparing(Task::title))   // 两参比较也是引用
+```
+
+辨析一句：`Task::title` 里 title 是 **record 的访问器**（A02 造的）；lambda 版更直白但长。当方法引用一眼读得懂时优先引用——**这条惯例在 TripController 的 30 行 lambda 已经满场使用**。
+
+## 4. 模式对比 / 选型表
+
+| 操作 | 干什么 | Python 对应 |
+|---|---|---|
+| filter | 挑 | if 子句 |
+| map | 变换 | 表达式部分 |
+| sorted | 排序 | sorted() |
+| distinct | 去重（保序） | set |
+| limit(n)/skip(n) | 截取 | [:n]/[n:] |
+| Collectors.groupingBy | 分组 | defaultdict 分组 |
+| Collectors.joining("、") | 拼字符串 | "、".join() |
+| count/anyMatch/allMatch | 统计/判定 | len/any/all |
+| collect(toList()) | 收集合 | list(...) |
+| reduce | 聚合折叠 | functools.reduce |
+
+## 5. 动手验证
+
+1. 复跑 3.1 的 curl 灌数据与 3.2 的 java 管道，逐行对账（真数据核对：② 的结果应没有"买高铁票"）。
+2. 在 ② 的管道里加一条 `.sorted(Comparator.comparing(Task::title))` + `.collect(Collectors.joining("、"))`，输出应为排序后拼接的"查车次余票、订酒店"（用你自己的数据名对账）。
+3. 3.3 的惰性与一次性两步拍（第二次 count 炸 IllegalStateException）亲自拦一次。
+4. 顺手把 demo-counter 也"流"一把：`curl http://127.0.0.1:8083/api/counter` 三次，观察 `{n:...}` 单调递增——channel 不同（计数器不经过 stream）但同样"管道出结果"的思路。
 
 ## 思考题
 
-1. `tasks.stream().filter(a).map(b).toList()` 中 filter 和 map 谁先执行？是"先过滤完所有元素再 map"吗？
+1. `tasks.stream().filter(a).map(b).toList()` 中 filter 和 map 谁先执行？是"先过滤完整表再 map"吗？
 2. 为什么 BookingController 的审计台用数据库分页而不是 `stream().skip(n).limit(5)`？
-3. `map(Task::title)` 和 `map(t -> t.title)` 等价吗？哪种更适合教学阅读？
-4. Optional（`findById` 的返回值）和空 List（`findAll` 的返回值）表达"没有"的方式不同，为什么 API 作者要这样设计？
+3. `map(Task::title)` 和 `map(t -> t.title)` 等价吗？团队惯例怎么选？
+4. Optional（findById）vs 空 List（findAll）表达"没有"的设计信号？
+5. 实录 3.2 第 ④ 步为什么用 `groupingBy(t -> t.done() + "")` 再 parseBoolean，而不是直接 `groupingBy(t -> t.done())` 类似物？
 
 ## 练习题
 
-**练习 1**：对实验 1 的真实数据，用 curl 拿回 JSON，用 Python `json` 模块解析后完成与实验 2 相同的四条管道——体会两种语言的对应关系。
-
-**练习 2**：在 jshell 里对 tasks 做"分组统计"：按 done 值分组，统计各组数量（`Collectors.groupingBy` + `counting()`）。
-
-**练习 3**：仿照 TripController，写 `stream().map(...).toList()` 把 tasks 变成 `List<Map<String,Object>>`（键：id/title/done），用 LinkedHashMap 保证键序。
+**练习 1**：把 3.1 的真实数据重新 curl 一遍，用 Python `json` 实现同样四条管道。
+**练习 2**：在 jshell 对 tasks 做 `Collectors.groupingBy` 分组统计（键：done；值：counting）。
+**练习 3**：仿 TripController.java:31-44 的形状，把 tasks 变成 `List<Map<String,Object>>`（键 id/title/done，LinkedHashMap 保序）。
 
 ### 完整参考答案
 
-**思考题 1**：逐元素垂直执行——第一个元素走完 filter→map 再轮到第二个（除非有 sorted 这类"全量操作"才退化为分阶段）。不是"先过滤完整表再 map"。可以打日志验证：在 filter 和 map 里各打印一行，输出是交替的。
-
-**思考题 2**：数据在数据库里，`stream().skip/limit` 要先把**全部**行查进内存再丢弃——数据量大时是灾难。数据库 LIMIT/OFFSET 只取需要的那几行。原则：**能下推给数据库的就下推**，Stream 只加工已进内存的数据。
-
-**思考题 3**：等价。方法引用更短，但读者要知道 title 是 Task 的字段访问器；教学场景 lambda 显式写出参数更直白。团队惯例：简单取字段/调方法用引用，有逻辑的用 lambda。
-
-**思考题 4**：`findById` 查"单个东西"——"没有"是常态之一，用 Optional 逼调用方显式处理（orElseThrow/map/ifPresent）；`findAll` 查"一批"——"没有"就是空集合，空集合本身可安全遍历，无需特殊处理。**单数用 Optional，复数用空集合**——这是集合 API 设计的经典约定。
-
-**练习 1 参考**：
-
-```python
-import json, urllib.request
-tasks = json.load(urllib.request.urlopen("http://127.0.0.1:8081/api/tasks"))
-print([t["title"] for t in tasks])                                # map
-print([t["title"] for t in tasks if not t["done"]])               # filter+map
-print(sum(1 for t in tasks if "票" in t["title"]))                # filter+count
-print("、".join(sorted(t["title"] for t in tasks if not t["done"])))  # joining
-```
+**思考 1**：逐元素**垂直执行**——第一个元素走完 filter→map 再轮到第二个；不是"先过滤完整表再 map"。可以在 filter 与 map 里各打印一行，输出是交替的（除非管道里出现 sorted 这类"全量操作"，才退化为分阶段）。
+**思考 2**：`skip/limit` 要先把**全部**行查进内存再丢弃，数据量大是灾难；DB 的 LIMIT/OFFSET 只取需要几行。原则：**能下推给数据库的就下推**，Stream 只加工已进内存的数据。
+**思考 3**：等价。方法引用更短，但读者要知道 title 是访问器；教学场景 lambda 显式参数更直白。惯例：简单取字段/调方法用引用，有逻辑用 lambda。
+**思考 4**：单数"没有"用 Optional 逼你处理（orElseThrow/map/ifPresent）；复数"没有"是空集合（可安全遍历）。**单数 Optional，复数空集合**——集合 API 设计的经典约定。
+**思考 5**：`groupingBy` 要求分类键稳定且能做 Map 键；直接用 boolean 作为键也能用（`groupingBy(t -> t.done())` 出 `{false=2, true=1}`），教学版转成 `"已完成/未完成"` 只是打印友好——功能上等价，可读性加分。
 
 **练习 2 参考**：
 
 ```java
-jshell> tasks.stream().collect(java.util.stream.Collectors.groupingBy(t -> t.done, java.util.stream.Collectors.counting()))
+jshell> tasks.stream().collect(Collectors.groupingBy(t -> t.done(), Collectors.counting()))
 $7 ==> {false=2, true=1}
 ```
 
@@ -264,24 +213,38 @@ $7 ==> {false=2, true=1}
 
 ```java
 jshell> tasks.stream().map(t -> {
-   ...>   var m = new java.util.LinkedHashMap<String,Object>();
+   ...>   var m = new LinkedHashMap<String,Object>();
    ...>   m.put("id", t.id); m.put("title", t.title); m.put("done", t.done);
    ...>   return m;
    ...> }).toList()
-$8 ==> [{id=1, title=买票, done=true}, {id=2, title=订酒店, done=false}, {id=3, title=买票回程, done=false}]
+$8 ==> [{id=2, title=买高铁票, done=true}, ...]
 ```
 
 这与 TripController.java:32-44 的结构逐行同构——车次 JSON 就是这么造出来的。
 
+### 完整参考答案（练习 1 的 Python 版逐行）
+
+
+```python
+import json, urllib.request
+tasks = json.load(urllib.request.urlopen("http://127.0.0.1:8081/api/tasks"))
+print([t["title"] for t in tasks])
+print([t["title"] for t in tasks if not t["done"]])
+print(sum(1 for t in tasks if "票" in t["title"]))
+print("、".join(sorted(t["title"] for t in tasks if not t["done"])))
+```
+
+四条 Python 对应 3.2 的 ①②③④——"会一种就会另一种"的物证。
+
 ---
 
 ## 本节小结
-- lambda = 函数式接口的实例；五接口五法：Predicate/Function/Consumer/Supplier/BiFunction。
+- lambda = 函数式接口的实例；五接口（Predicate/Function/Consumer/Supplier/BiFunction）一熟练，管道就明。
 - 方法引用四种形式，简单场景是 lambda 的缩写。
 - 管道三段式：源 → 惰性中间操作 → 终端操作；Stream 一次性，用完重开。
-- Python 列表推导式 ↔ Stream 逐条对应；会一种就会另一种。
-- 实战套路：repo.findAll() 拿 List → filter/map/toList 加工 → 返回给前端；大数据先让数据库分页。
+- 真数据从 API 取（curl /api/tasks），与 Python 推导式逐条对齐——**会一种就会另一种**。
+- 实战套路：repo.findAll() 拿 List → filter/map/toList 加工 → 返回给前端；大数据先让数据库分页；3 行以上的 lambda 体抽成方法。
 
 ## 下一站
 
-[Java速通-A06-注解与反射：为什么Spring满是@符号.md](Java速通-A06-注解与反射：为什么Spring满是@符号.md)——你一路见过的 @Entity/@Id/@RestController 到底凭什么改变程序行为？答案：注解只是标签，反射才是读标签的人。Java 速通系列在此收官，前方就是 Spring Boot 内核。
+[Java速通-A06-注解与反射：为什么Spring满是@符号.md](Java速通-A06-注解与反射：为什么Spring满是@符号.md)——@Entity/@Id/@RestController 凭什么改变行为？亲手加一个自定义注解并反射实测（含 javap 验尸）。

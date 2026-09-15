@@ -128,13 +128,89 @@ train 的真实选择是 @Value——因为它只有 secret 与 ttl 两个参数
 
 ---
 
-## 4. Profile：同一张卡的不同版本
+## 4. 工程实录：真实问题与解决——kafka bootstrap-servers 拼进一个"活着"的错端口
 
-### 是什么
+**问题**：手滑把 train 的 `spring.kafka.bootstrap-servers` 写成 `127.0.0.1:9093`——一个端口**存在**、但不是 broker 协议的号码。这种 typo 的可怕之处：**应用照样启动成功、接口照样 200**，事故只藏在消费侧的日志洪水里。
+
+### 现场复现
+
+改卡（真 diff）：
+
+```diff
+--- backend/train/src/main/resources/application.yml
++++ backend/train/src/main/resources/application.yml
+@@ -18,1 +18,1 @@
+-    bootstrap-servers: 127.0.0.1:9092
++    bootstrap-servers: 127.0.0.1:9093
+```
+
+重打包 + 换库启动（内存 H2，不动生产件）：
+
+```bash
+cd backend && mvn -q -pl train package -DskipTests
+cd /tmp/opencode
+java -jar ~/Projects/javaweb/backend/train/target/train-1.0.0.jar \
+    --server.port=7084 \
+    --spring.datasource.url='jdbc:h2:mem:badk;DB_CLOSE_DELAY=-1' > /tmp/opencode/bad2.log 2>&1 &
+```
+
+**实测启动日志（一切"看起来正常"）：**
+
+```
+2026-09-15T09:57:42.045+08:00  INFO 129042 --- [train] [           main] com.javaweb.train.TrainApp  : Started TrainApp in 3.1 seconds
+（且配置回显里第一条实锤，第 55 行）
+	bootstrap.servers = [127.0.0.1:9093]
+```
+
+但**60 秒内日志洪泛**（`wc -l` 实测 `25187161` 行），开头的真实原文是：
+
+```
+2026-09-15T09:57:46.691+08:00 ERROR 129042 --- [train] [ntainer#0-0-C-1] o.s.k.l.KafkaMessageListenerContainer    : Consumer exception
+
+Caused by: org.apache.kafka.common.errors.UnsupportedVersionException: The node does not support FIND_COORDINATOR
+2026-09-15T09:57:46.693+08:00  INFO 129042 --- [train] [ntainer#0-0-C-1] o.a.k.c.c.internals.ConsumerCoordinator : [Consumer clientId=consumer-audit-1, groupId=audit] FindCoordinator request hit fatal exception
+```
+
+### 排查路径
+
+1. **陌生但具体的异常名**：`UnsupportedVersionException` 不是"连不上"（那会是 `Bootstrap broker ... disconnected` 的 WARN），而是**连上了、但对面不说 Kafka broker 语言**。
+2. 看那个端口上到底住着谁（VUID 之一）：
+
+```bash
+$ ss -tlnp | grep 9093
+LISTEN 0 50 *:9093 ... users:(("java",pid=124638,fd=135))     ← 就是 Kafka 自己！
+$ grep -n 'listeners=' tools/kafka/config/server.properties
+37:listeners=PLAINTEXT://:9092,CONTROLLER://:9093
+```
+
+真相大白：这是 **KRaft**（4.3.1）模式——`9093` 是 **controller 监听口**，只说 KRaft 内部协议；bootstrap 指过去，客户端握手上到一半就抛 `FIND_COORDINATOR / METADATA 不支持`，Spring Kafka 错误处理器又不断重试 → 日志 洪 泛。**"端口活着"≠"端口正确"**——比"对端口压根没开"（WARN disconnected）更毒，因为前者连报警声都是错的形状。
+
+### 修复与再次验证
+
+```diff
+--- backend/train/src/main/resources/application.yml
++++ backend/train/src/main/resources/application.yml
+@@ -18,1 +18,1 @@
+-    bootstrap-servers: 127.0.0.1:9093
++    bootstrap-servers: 127.0.0.1:9092
+```
+
+回填后 `mvn -q -pl train package -DskipTests` 重跑，日志回落到安静形态（审计消费正常，`group-offset` 可对账——见 K 篇）：
+
+```
+nohup java -jar target/train-1.0.0.jar --server.port=7084 --spring.datasource.url='jdbc:h2:mem:badk2' > /tmp/opencode/badok.log 2>&1 &
+sleep 30 && grep -c 'Consumer exception' /tmp/opencode/badok.log    # 0 —— 一个不剩
+```
+
+**本章刻度**：配置 typo 有两种死法——**冷死**（端口没人听，WARN 循环）与**假活**（controller 口，UNsupported 翻滚）。日志洪泛本身就是"配置有事"的最响警报；运维第一课：日志体积陡增 = 先看 ERROR 是哪家的循环，再谈别的。
+
+---
+
+## 5. Profile：同一张卡的不同版本
 
 `application.yml` 是默认底稿；还可以有 `application-dev.yml`、`application-prod.yml` 的"分版本补丁"。启动时 `spring.profiles.active=dev` 选版本。
 
-### 本站实录：不改一行 yml，换端营业
+### 本站实录A：不改一行 yml，换端营业（保留）
 
 ```bash
 cd /home/icaruslee/Projects/javaweb
@@ -166,7 +242,7 @@ $ curl -s 127.0.0.1:7084/api/trips | head -c 120
 
 ---
 
-## 5. 动手验证
+## 6. 动手验证
 
 ```bash
 cd /home/icaruslee/Projects/javaweb
@@ -190,21 +266,21 @@ APP_JWT_TTL_MINUTES=30          # ← relaxed binding 可把 app.jwt.ttl-minutes
 
 ---
 
-## 6. 思考题（先想 3 分钟）
+## 7. 思考题（先想 3 分钟）
 
 1. `@Value("${app.jwt.secret}")` 不带兜底为什么是对 JWT 的正确设计？改成 `${app.jwt.secret:changeme}` 会引入什么风险？
 2. 命令行 `--app.jwt.ttl-minutes=5` 改的是**签发端**。已经签出去的 token 过期时间会变吗？（提示：`exp` 是签发瞬间烙死的——S13 伏线。）
 3. `spring.jpa.open-in-view: false`——Boot 默认其实是 true（demo-chat 的启动日志里有一句 WARN）。显式关掉，是在防什么？
 4. `spring.data.redis.host` 有四级、`server.port` 只有两级：嵌套的**深浅**由什么决定？——别答"个人喜好"，想想谁是读者。
 
-## 7. 练习题
+## 8. 练习题
 
 1. 用 `@ConfigurationProperties(prefix="app.jwt")` 重写 train 的 JwtUtil 构造器注入（建 `JwtProps` 类：`secret` 与 `ttlMinutes`），保证行为与现等价。
 2. 给 demo-todo 加 `application-dev.yml`（`server.port: 9081`），`--spring.profiles.active=dev` 走通，实测输出。
 3. 找出 takeaway 的 yml 中 `kafka.consumer.group-id` 的值并用 curl/审计端点佐证它是谁在消费。
 4. 用环境变量方式把 demo-todo 开在 9099 端口并实测。
 
-## 8. 参考答案
+## 9. 参考答案
 
 **练习 1**：
 
@@ -271,7 +347,7 @@ relaxed binding 把大写下划线反推为小写点路径——这就是云环�
 
 ---
 
-## 9. 本节小结
+## 10. 本节小结
 
 - `application.yml` 是编号卡：缩进即路径，短横线处处驼峰化，三条来路要分清优先级。
 - `@Value` 舀一勺（兜底靠冒号），`@ConfigurationProperties` 整包成 bean；secret 类无兜底是特性不是疏忽。
@@ -279,6 +355,6 @@ relaxed binding 把大写下划线反推为小写点路径——这就是云环�
 
 ---
 
-## 10. 下一站
+## 11. 下一站
 
 店能不能跑稳，光看响应码是不够的——得看**记账本**。S09：日志·观测·actuator——Spring Boot 的对账单格式、级别开关、`logging.file`、以及 actuator 的 health/metrics 体检端点，全部用本机 logs/*.log 的真实行逐格拆。
